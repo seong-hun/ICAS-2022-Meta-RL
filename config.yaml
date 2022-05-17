@@ -1,0 +1,18 @@
+Env:
+  fkw:
+    dt: 0.01
+    max_t: 20
+
+  perturb:
+    pos: 1  # m
+    vel: 2  # m/s
+    angles: 10  # deg
+    omega: 4  # rad/sec
+
+  flat_Q: [
+    1, 1, 1,
+    1, 1, 1,
+    1, 1, 1,
+    1, 1, 1,
+  ]
+  flat_R: [1, 1, 1, 1]
