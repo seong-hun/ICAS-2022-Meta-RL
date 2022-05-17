@@ -20,7 +20,16 @@ class Env(fym.BaseEnv, gym.Env):
         self.plant = Multicopter()
 
         # observation: pos (3), vel (3), angles (3), omega (3)
-        self.observation_space = spaces.Box(
+        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(12,))
+        # action: rotorfs (4)
+        self.action_space = spaces.Box(
+            low=0,
+            high=self.plant.rotorf_max,
+            shape=(4,),
+            dtype=np.float32,
+        )
+        # state space for checking unwanted state
+        self.state_space = spaces.Box(
             low=np.hstack(
                 [
                     [-10, -10, -20],  # pos
@@ -37,14 +46,6 @@ class Env(fym.BaseEnv, gym.Env):
                     [50, 50, 50],  # omega
                 ]
             ),
-            dtype=np.float32,
-        )
-        # action: rotorfs (4)
-        self.action_space = spaces.Box(
-            low=0,
-            high=self.plant.rotorf_max,
-            shape=(4,),
-            dtype=np.float32,
         )
 
         self.flat_Q = env_config["flat_Q"]
@@ -58,7 +59,7 @@ class Env(fym.BaseEnv, gym.Env):
         reward = self.get_reward(action)
         _, done = self.update(action=action)
         next_obs = self.observation()
-        done = done or not self.observation_space.contains(next_obs)
+        done = done or not self.state_space.contains(next_obs)
         return next_obs, reward, done, {}
 
     def set_dot(self, t, action):
@@ -83,13 +84,13 @@ class Env(fym.BaseEnv, gym.Env):
 
         # randomly perturbate the state
         while True:
-            obs = np.float64(self.observation_space.sample())
+            obs = np.float64(self.state_space.sample())
             self.plant.pos.state = obs[:3][:, None]
             self.plant.vel.state = obs[3:6][:, None]
             self.plant.R.state = Rotation.from_euler("ZYX", obs[6:9][::-1]).as_matrix()
             self.plant.omega.state = obs[9:12][:, None]
 
-            if self.observation_space.contains(self.observation()):
+            if self.state_space.contains(self.observation()):
                 break
 
         return self.observation()
