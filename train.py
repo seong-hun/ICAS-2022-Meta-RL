@@ -86,7 +86,7 @@ class Env(fym.BaseEnv, gym.Env):
             obs = np.float64(self.observation_space.sample())
             self.plant.pos.state = obs[:3][:, None]
             self.plant.vel.state = obs[3:6][:, None]
-            self.plant.R.state = Rotation.from_euler("ZYX", obs[6:9]).as_matrix()
+            self.plant.R.state = Rotation.from_euler("ZYX", obs[6:9][::-1]).as_matrix()
             self.plant.omega.state = obs[9:12][:, None]
 
             if self.observation_space.contains(self.observation()):
@@ -121,9 +121,9 @@ def train():
 def main():
     register_env("quadrotor", lambda env_config: Env(env_config))
 
-    #     env = Env(CONFIG["Env"])
-    #     env.reset()
-    #     breakpoint()
+    # env = Env(CONFIG["Env"])
+    # env.reset()
+    # breakpoint()
 
     train()
 
