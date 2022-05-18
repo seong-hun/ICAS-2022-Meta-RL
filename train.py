@@ -4,7 +4,7 @@ import numpy as np
 import ray
 import yaml
 from gym import spaces
-from ray.rllib.agents import ppo
+from ray import tune
 from ray.tune.registry import register_env
 from scipy.spatial.transform import Rotation
 
@@ -109,12 +109,16 @@ def train():
         "lr": 1e-4,
         "gamma": 0.999,
     }
-    trainer = ppo.PPOTrainer(config=config)
-
-    for _ in range(3):
-        trainer.train()
-
-    trainer.evaluate()
+    tune.run(
+        "PPO",
+        config=config,
+        stop={
+            "training_iteration": 1000,
+        },
+        local_dir="./ray-results",
+        checkpoint_freq=30,
+        checkpoint_at_end=True,
+    )
 
     ray.shutdown()
 
