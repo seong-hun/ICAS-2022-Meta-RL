@@ -51,7 +51,7 @@ class Env(fym.BaseEnv, gym.Env):
         # the desired obs for the LQR cost
         self.obs_des = np.zeros(self.observation_space.shape or (12,))
         # set the hovering height = 2m
-        self.obs_space[2] = -2
+        self.obs_des[2] = -2
 
         self.flat_Q = env_config["flat_Q"]
         self.flat_R = env_config["flat_R"]
