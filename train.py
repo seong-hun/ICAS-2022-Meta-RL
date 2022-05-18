@@ -4,7 +4,9 @@ import numpy as np
 import ray
 import yaml
 from gym import spaces
+from loguru import logger
 from ray import tune
+from ray.rllib.agents import ppo
 from ray.tune.registry import register_env
 from scipy.spatial.transform import Rotation
 
@@ -106,29 +108,75 @@ class Env(fym.BaseEnv, gym.Env):
         return self.observation()
 
 
+def experiment(config):
+    # remove tune config from config for PPOTrainer
+    tune_config = config.pop("tune")
+    iterations = tune_config["train_iterations"]
+    # make trainer
+    logger.debug("Making PPOTrainer")
+    train_agent = ppo.PPOTrainer(config=config)
+    checkpoint = None
+    train_results = {}
+
+    # training
+    logger.debug("Start training")
+    for i in range(iterations):
+        logger.debug(f"Iter {i} start")
+        train_results = train_agent.train()
+        logger.debug(f"Iter {i} finished")
+        if i % tune_config["save_period"] == 0 or i == iterations - 1:
+            checkpoint = train_agent.save(tune.get_trial_dir())
+        tune.report(**train_results)
+
+    train_agent.stop()
+
+    # evaluation
+    eval_agent = ppo.PPOTrainer(config=config)
+    eval_agent.restore(checkpoint)
+    env = eval_agent.workers.local_worker().env
+
+    eval_results = {
+        "eval_reward": 0,
+        "eval_eps_length": 0,
+    }
+
+    obs = env.reset()
+    while True:
+        action = eval_agent.compute_single_action(obs)
+        _, reward, done, _ = env.step(action)
+        eval_results["eval_reward"] += reward
+        eval_results["eval_eps_length"] += 1000
+        if done:
+            break
+
+    results = train_results | eval_results
+    tune.report(**results)
+
+
 def train():
-    ray.init(ignore_reinit_error=True, log_to_driver=False)
+    ray.init(log_to_driver=False)
 
     config = {
         "env": "quadrotor",
         "env_config": CONFIG["Env"],
         "framework": "torch",
         "num_gpus": 0,
-        "num_workers": 12,
-        "num_envs_per_worker": 50,
-        "lr": 1e-4,
-        "gamma": 0.999,
+        # "num_workers": 12,
+        # "num_envs_per_worker": 50,
+        # "lr": 1e-4,
+        # "gamma": 0.999,
+        "tune": CONFIG["tune"],
     }
+    resources = ppo.PPOTrainer.default_resource_request(config)
+
+    logger.info("Strat tune.run")
     tune.run(
-        "PPO",
+        experiment,
         config=config,
-        stop={
-            "training_iteration": 1000,
-        },
+        resources_per_trial=resources,
         local_dir="./ray-results",
-        checkpoint_freq=30,
-        checkpoint_at_end=True,
     )
+    logger.info("Finish tune.run")
 
     ray.shutdown()
 

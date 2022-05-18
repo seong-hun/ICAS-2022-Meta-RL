@@ -16,3 +16,7 @@ Env:
     1, 1, 1,
   ]
   flat_R: [1, 1, 1, 1]
+
+tune:
+  train_iterations: 1000
+  save_period: 10
