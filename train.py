@@ -53,6 +53,7 @@ class Env(fym.BaseEnv, gym.Env):
         # set the hovering height = 2m
         self.obs_des[2] = -2
 
+        self.reward_scale = self.clock.dt
         self.flat_Q = env_config["flat_Q"]
         self.flat_R = env_config["flat_R"]
         self.perturb = env_config["perturb"]
@@ -81,9 +82,12 @@ class Env(fym.BaseEnv, gym.Env):
     def get_reward(self, action):
         obs = self.observation()
         # LQR reward
-        reward = -np.sum((obs - self.obs_des) ** 2 * self.flat_Q) - np.sum(
-            action**2 * self.flat_R
+        reward = 1
+        reward += np.exp(
+            -np.sum((obs - self.obs_des) ** 2 * self.flat_Q)
+            - np.sum(action**2 * self.flat_R)
         )
+        reward *= self.reward_scale
         return np.float32(reward)
 
     def reset(self):
