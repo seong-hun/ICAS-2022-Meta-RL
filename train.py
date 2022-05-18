@@ -48,6 +48,11 @@ class Env(fym.BaseEnv, gym.Env):
             ),
         )
 
+        # the desired obs for the LQR cost
+        self.obs_des = np.zeros(self.observation_space.shape or (12,))
+        # set the hovering height = 2m
+        self.obs_space[2] = -2
+
         self.flat_Q = env_config["flat_Q"]
         self.flat_R = env_config["flat_R"]
         self.perturb = env_config["perturb"]
@@ -76,22 +81,23 @@ class Env(fym.BaseEnv, gym.Env):
     def get_reward(self, action):
         obs = self.observation()
         # LQR reward
-        reward = -np.sum(obs**2 * self.flat_Q) + np.sum(action**2 * self.flat_R)
+        reward = -np.sum((obs - self.obs_des) ** 2 * self.flat_Q) - np.sum(
+            action**2 * self.flat_R
+        )
         return np.float32(reward)
 
     def reset(self):
         super().reset()
 
         # randomly perturbate the state
-        while True:
-            obs = np.float64(self.state_space.sample())
-            self.plant.pos.state = obs[:3][:, None]
-            self.plant.vel.state = obs[3:6][:, None]
-            self.plant.R.state = Rotation.from_euler("ZYX", obs[6:9][::-1]).as_matrix()
-            self.plant.omega.state = obs[9:12][:, None]
+        obs = np.float64(self.state_space.sample())
+        self.plant.pos.state = obs[:3][:, None]
+        self.plant.vel.state = obs[3:6][:, None]
+        self.plant.R.state = Rotation.from_euler("ZYX", obs[6:9][::-1]).as_matrix()
+        self.plant.omega.state = obs[9:12][:, None]
 
-            if self.state_space.contains(self.observation()):
-                break
+        # check the state space contains the random state
+        assert self.state_space.contains(self.observation())
 
         return self.observation()
 
@@ -125,10 +131,6 @@ def train():
 
 def main():
     register_env("quadrotor", lambda env_config: Env(env_config))
-
-    # env = Env(CONFIG["Env"])
-    # env.reset()
-    # breakpoint()
 
     train()
 
