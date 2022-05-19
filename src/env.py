@@ -97,7 +97,9 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         self.plant = Multicopter()
 
         # observation: pos (3), vel (3), angles (3), omega (3)
-        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(12,), dtype=np.float32)
+        self.observation_space = spaces.Box(
+            -np.inf, np.inf, shape=(12,), dtype=np.float32
+        )
         # action: rotorfs (4)
         self.action_space = spaces.Box(
             low=0,
@@ -107,33 +109,34 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         )
         # state space for checking unwanted state
         self.state_space = spaces.Box(
-            low=np.float32(np.hstack(
-                [
-                    [-10, -10, -20],  # pos
-                    [-20, -20, -20],  # vel
-                    np.deg2rad([-80, -80, -360]),  # angles
-                    [-50, -50, -50],  # omega
-                ]
-            )),
-            high=np.float32(np.hstack(
-                [
-                    [10, 10, 0],  # pos
-                    [20, 20, 20],  # vel
-                    np.deg2rad([80, 80, 360]),  # angles
-                    [50, 50, 50],  # omega
-                ]
-            )),
+            low=np.float32(
+                np.hstack(
+                    [
+                        env_config["state_space"]["pos"]["low"],
+                        env_config["state_space"]["vel"]["low"],
+                        np.deg2rad(env_config["state_space"]["angles"]["low"]),
+                        env_config["state_space"]["omega"]["low"],
+                    ]
+                )
+            ),
+            high=np.float32(
+                np.hstack(
+                    [
+                        env_config["state_space"]["pos"]["high"],
+                        env_config["state_space"]["vel"]["high"],
+                        np.deg2rad(env_config["state_space"]["angles"]["high"]),
+                        env_config["state_space"]["omega"]["high"],
+                    ]
+                )
+            ),
         )
 
         # the desired obs for the LQR cost
-        self.obs_des = np.zeros(self.observation_space.shape or (12,))
-        # set the hovering height = 2m
-        self.obs_des[2] = -2
+        self.obs_des = np.array(env_config["obs_des"])
 
         self.reward_scale = self.clock.dt
         self.flat_Q = env_config["flat_Q"]
         self.flat_R = env_config["flat_R"]
-        self.perturb = env_config["perturb"]
 
         self.rng = np.random.default_rng()
 
@@ -167,11 +170,16 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         reward *= self.reward_scale
         return np.float32(reward)
 
-    def reset(self):
+    def reset(self, with_obs=None):
         super().reset()
 
-        # randomly perturbate the state
-        obs = np.float64(self.state_space.sample())
+        if with_obs is not None:
+            obs = with_obs
+        else:
+            # randomly perturbate the state
+            obs = np.float64(self.state_space.sample())
+
+        # set states from obs
         self.plant.pos.state = obs[:3][:, None]
         self.plant.vel.state = obs[3:6][:, None]
         self.plant.R.state = Rotation.from_euler("ZYX", obs[6:9][::-1]).as_matrix()

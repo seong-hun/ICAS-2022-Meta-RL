@@ -2,16 +2,30 @@ env_config:
   fkw:
     dt: 0.01
     max_t: 20
-  perturb:
-    pos: 1  # m
-    vel: 2  # m/s
-    angles: 10  # deg
-    omega: 4  # rad/sec
+  state_space:
+    pos:
+      low: [-5., -5., -15.]
+      high: [5., 5., -5.]
+    vel:
+      low: [-5., -5., -5.]
+      high: [5., 5., 5.]
+    angles:
+      low: [-30., -30., -360.]  # deg
+      high: [30., 30., 360.]  # deg
+    omega:
+      low: [-10., -10., -10.]
+      high: [10., 10., 10.]
+  obs_des: [
+    0., 0., -5.,  # pos
+    0., 0., 0.,  # vel
+    0., 0., 0.,  # angles
+    0., 0., 0.,  # omega
+  ]
   flat_Q: [
-    1, 1, 1,
-    1, 1, 1,
-    1, 1, 1,
-    1, 1, 1,
+    10, 10, 10,  # pos
+    1, 1, 1,  # vel
+    100, 100, 100,  # angles
+    10, 10, 10,  # omega
   ]
   flat_R: [1, 1, 1, 1]
 
@@ -19,6 +33,8 @@ config:
   env: "quadrotor"
   framework: "torch"
   num_gpus: 0
+  lr: 1.e-3
+  gamma: 0.99
 
 tune:
   run_or_experiment: "PPO"
@@ -27,3 +43,4 @@ tune:
   local_dir: "./ray-results"
   checkpoint_freq: 30
   checkpoint_at_end: true
+  num_samples: 10
