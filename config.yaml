@@ -22,12 +22,12 @@ env_config:
     0., 0., 0.,  # omega
   ]
   flat_Q: [
-    10, 10, 10,  # pos
-    1, 1, 1,  # vel
-    100, 100, 100,  # angles
-    10, 10, 10,  # omega
+    0.1, 0.1, 0.1,  # pos
+    0.01, 0.01, 0.01,  # vel
+    0.1, 0.1, 0.1,  # angles
+    0.01, 0.01, 0.01,  # omega
   ]
-  flat_R: [1, 1, 1, 1]
+  flat_R: [0.1, 0.1, 0.1, 0.1]
 
 config:
   env: "quadrotor"

@@ -163,10 +163,8 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         obs = self.observation()
         # LQR reward
         reward = 1
-        reward += np.exp(
-            -np.sum((obs - self.obs_des) ** 2 * self.flat_Q)
-            - np.sum(action**2 * self.flat_R)
-        )
+        reward += np.exp(-np.sum((obs - self.obs_des) ** 2 * self.flat_Q))
+        reward += np.exp(-np.sum(action**2 * self.flat_R))
         reward *= self.reward_scale
         return np.float32(reward)
 
