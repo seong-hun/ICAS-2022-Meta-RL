@@ -2,13 +2,11 @@ Env:
   fkw:
     dt: 0.01
     max_t: 20
-
   perturb:
     pos: 1  # m
     vel: 2  # m/s
     angles: 10  # deg
     omega: 4  # rad/sec
-
   flat_Q: [
     1, 1, 1,
     1, 1, 1,
@@ -18,5 +16,13 @@ Env:
   flat_R: [1, 1, 1, 1]
 
 tune:
-  train_iterations: 1000
-  save_period: 10
+  run_or_experiment: "PPO"
+  config:
+    env: "quadrotor"
+    framework: torch
+    num_gpus: 0
+  stop:
+    training_iteration: 1000
+  local_dir: "./ray-results"
+  checkpoint_freq: 30
+  checkpoint_at_end: true
