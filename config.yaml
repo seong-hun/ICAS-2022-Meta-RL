@@ -1,4 +1,4 @@
-Env:
+env_config:
   fkw:
     dt: 0.01
     max_t: 20
@@ -15,12 +15,13 @@ Env:
   ]
   flat_R: [1, 1, 1, 1]
 
+config:
+  env: "quadrotor"
+  framework: "torch"
+  num_gpus: 0
+
 tune:
   run_or_experiment: "PPO"
-  config:
-    env: "quadrotor"
-    framework: torch
-    num_gpus: 0
   stop:
     training_iteration: 1000
   local_dir: "./ray-results"
