@@ -16,12 +16,18 @@ def test():
     exppath = Path("ray-results/PPO")
     analysis = ExperimentAnalysis(str(exppath))
 
-    logger.info(f"Exp path: {str(exppath)}")
+    trial = analysis.get_best_trial(metric="training_iteration", mode="max")
 
-    last_checkpoint = analysis.get_last_checkpoint()
+    if trial is not None:
+        config = trial.config
+        last_checkpoint = analysis.get_last_checkpoint(trial)
+    else:
+        config = CONFIG["config"] | {"env_config": CONFIG["env_config"]}
+        last_checkpoint = analysis.get_last_checkpoint()
+
+    logger.info(f"Using checkpoint: {str(last_checkpoint)}")
 
     # set agent weight to the checkpoint
-    config = CONFIG["config"] | {"env_config": CONFIG["env_config"]}
     agent = ppo.PPOTrainer(config=config)
     agent.restore(last_checkpoint)
 
@@ -31,7 +37,7 @@ def test():
     logger.info(f"Loaded: {str(trainpath)}")
 
     # make env
-    env = QuadEnv(CONFIG["env_config"])
+    env = QuadEnv(config["env_config"])
 
     logger.info("Start test flight")
 
