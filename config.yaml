@@ -35,6 +35,7 @@ config:
   num_gpus: 0
   lr: 1.e-3
   gamma: 0.99
+  disable_env_checking: True,
 
 tune:
   run_or_experiment: "PPO"

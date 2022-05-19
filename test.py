@@ -14,26 +14,29 @@ with open("config.yaml", "r") as f:
 def test():
     # get last checkpoint of experiments
     exppath = Path("ray-results/PPO")
-    analysis = ExperimentAnalysis(str(exppath))
+    analysis = ExperimentAnalysis(
+        str(exppath), default_metric="episode_len_mean", default_mode="max"
+    )
 
-    trial = analysis.get_best_trial(metric="training_iteration", mode="max")
+    trial = analysis.get_best_trial()
 
     if trial is not None:
         config = trial.config
-        last_checkpoint = analysis.get_last_checkpoint(trial)
+        checkpoint = analysis.get_best_checkpoint(trial)
     else:
+        # If there is no the best Trial, use the last checkpoint
         config = CONFIG["config"] | {"env_config": CONFIG["env_config"]}
-        last_checkpoint = analysis.get_last_checkpoint()
+        checkpoint = analysis.get_last_checkpoint(trial)
 
-    logger.info(f"Using checkpoint: {str(last_checkpoint)}")
+    logger.info(f"Using checkpoint: {str(checkpoint)}")
 
     # set agent weight to the checkpoint
     agent = ppo.PPOTrainer(config=config)
-    agent.restore(last_checkpoint)
+    agent.restore(checkpoint)
 
     logger.debug("Agent is restored")
 
-    trainpath = Path(str(last_checkpoint)).relative_to(exppath.resolve())
+    trainpath = Path(str(checkpoint)).relative_to(exppath.resolve())
     logger.info(f"Loaded: {str(trainpath)}")
 
     # make env
