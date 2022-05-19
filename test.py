@@ -41,7 +41,7 @@ def test():
     while not done:
         env.render()
         action = agent.compute_single_action(obs)
-        obs, reward, done, info = env.step(action)
+        obs, reward, done, _ = env.step(action)
         episode_reward += reward
 
     logger.info("End test flight")
