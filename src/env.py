@@ -135,7 +135,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         self.obs_des = np.array(env_config["obs_des"])
 
         self.reward_scale = self.clock.dt
-        self.flat_Q = env_config["flat_Q"]
+        self.flat_Q = np.hstack([np.ones(3) * Q_factor for Q_factor in env_config["flat_Q_factor"]])
         self.flat_R = env_config["flat_R"]
 
         self.rng = np.random.default_rng()
