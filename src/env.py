@@ -97,7 +97,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         self.plant = Multicopter()
 
         # observation: pos (3), vel (3), angles (3), omega (3)
-        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(12,))
+        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(12,), dtype=np.float32)
         # action: rotorfs (4)
         self.action_space = spaces.Box(
             low=0,
@@ -107,22 +107,22 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         )
         # state space for checking unwanted state
         self.state_space = spaces.Box(
-            low=np.hstack(
+            low=np.float32(np.hstack(
                 [
                     [-10, -10, -20],  # pos
                     [-20, -20, -20],  # vel
                     np.deg2rad([-80, -80, -360]),  # angles
                     [-50, -50, -50],  # omega
                 ]
-            ),
-            high=np.hstack(
+            )),
+            high=np.float32(np.hstack(
                 [
                     [10, 10, 0],  # pos
                     [20, 20, 20],  # vel
                     np.deg2rad([80, 80, 360]),  # angles
                     [50, 50, 50],  # omega
                 ]
-            ),
+            )),
         )
 
         # the desired obs for the LQR cost
