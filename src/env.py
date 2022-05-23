@@ -96,6 +96,8 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         super().__init__(**env_config["fkw"])
         self.plant = Multicopter()
 
+        self.plant.pos.initial_state = np.array(env_config["pos_init"])[:, None]
+
         # observation: pos (3), vel (3), angles (3), omega (3)
         self.observation_space = spaces.Box(
             -np.inf, np.inf, shape=(12,), dtype=np.float32
@@ -137,7 +139,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         # reward weights
         self.weights = {}
         for key, val in env_config["state_space"].items():
-            self.weigths[key] = 1 / max(np.abs(val["low"]), np.abs(val["high"])) / 3
+            self.weights[key] = 1 / max(*np.abs(val["low"]), *np.abs(val["high"])) / 3
         self.weights["action"] = 1 / self.plant.rotorf_max / 4
 
         self.reward_scale = self.clock.dt
@@ -149,13 +151,15 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         reward = self.get_reward(action)
         _, done = self.update(action=action)
         next_obs = self.observation()
-        done = done or not self.state_space.contains(next_obs)
+        bounds_out = not self.state_space.contains(next_obs)
+        done = done or bounds_out
         return next_obs, reward, done, {}
 
     def set_dot(self, t, action):
         # make a 2d vector from an 1d array
         rotorfs_cmd = np.float64(action[:, None])
-        return self.plant.set_dot(t, rotorfs_cmd)
+        plant_info = self.plant.set_dot(t, rotorfs_cmd)
+        return self.observe_dict() | plant_info
 
     def observation(self):
         pos, vel, R, omega = self.plant.observe_list()
@@ -167,9 +171,8 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         pos, vel, R, omega = self.plant.observe_list()
         angles = Rotation.from_matrix(R).as_euler("ZYX")[::-1]
 
-        reward = 0
-
         # hovering reward
+        reward = 5
         reward += max(0, 1 - np.sum(np.abs(pos - self.pos_des)))
         reward += -np.sum(np.abs(vel)) * self.weights["vel"]
         reward += -np.sum(np.abs(angles)) * self.weights["angles"]
@@ -189,7 +192,8 @@ class QuadEnv(fym.BaseEnv, gym.Env):
             obs = with_obs
         else:
             # randomly perturbate the state
-            obs = np.float64(self.state_space.sample())
+            # obs = np.float64(self.state_space.sample())
+            obs = self.observation()
 
         # set states from obs
         self.plant.pos.state = obs[:3][:, None]
