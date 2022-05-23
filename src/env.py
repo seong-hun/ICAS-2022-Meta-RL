@@ -132,13 +132,15 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         )
 
         # the desired obs for the LQR cost
-        self.obs_des = np.array(env_config["obs_des"])
+        self.pos_des = np.array(env_config["pos_des"])[:, None]
+
+        # reward weights
+        self.weights = {}
+        for key, val in env_config["state_space"].items():
+            self.weigths[key] = 1 / max(np.abs(val["low"]), np.abs(val["high"])) / 3
+        self.weights["action"] = 1 / self.plant.rotorf_max / 4
 
         self.reward_scale = self.clock.dt
-        self.flat_Q = np.hstack(
-            [np.ones(3) * Q_factor for Q_factor in env_config["flat_Q_factor"]]
-        )
-        self.flat_R = env_config["flat_R"]
 
         self.rng = np.random.default_rng()
 
@@ -162,11 +164,21 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         return np.float32(obs)
 
     def get_reward(self, action):
-        obs = self.observation()
-        # LQR reward
-        reward = 1
-        reward += np.exp(-np.sum((obs - self.obs_des) ** 2 * self.flat_Q))
-        reward += np.exp(-np.sum(action**2 * self.flat_R))
+        pos, vel, R, omega = self.plant.observe_list()
+        angles = Rotation.from_matrix(R).as_euler("ZYX")[::-1]
+
+        reward = 0
+
+        # hovering reward
+        reward += max(0, 1 - np.sum(np.abs(pos - self.pos_des)))
+        reward += -np.sum(np.abs(vel)) * self.weights["vel"]
+        reward += -np.sum(np.abs(angles)) * self.weights["angles"]
+        reward += -np.sum(np.abs(omega)) * self.weights["omega"]
+
+        # reward for low control effort
+        reward += -np.sum(action**2) * self.weights["action"]
+
+        # scaling
         reward *= self.reward_scale
         return np.float32(reward)
 
@@ -191,4 +203,5 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         return self.observation()
 
 
-register_env("quadrotor", lambda env_config: QuadEnv(env_config))
+def register():
+    register_env("quadrotor", lambda env_config: QuadEnv(env_config))

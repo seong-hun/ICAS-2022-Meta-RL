@@ -1,47 +1,66 @@
+config:
+  disable_env_checking: True,
+  env: quadrotor
+  framework: torch
+  gamma: 0.99
+  lr: 0.001
+  num_gpus: 0
 env_config:
   fkw:
     dt: 0.01
     max_t: 20
+  pos_des:
+    - 0.0
+    - 0.0
+    - -5.0
+  reward_weights:
+    action: 0.1
+    angles: 0.05
+    omega: 0.03
+    pos: 1
+    vel: 0.1
   state_space:
-    pos:
-      low: [-5., -5., -15.]
-      high: [5., 5., -5.]
-    vel:
-      low: [-5., -5., -5.]
-      high: [5., 5., 5.]
     angles:
-      low: [-30., -30., -360.]  # deg
-      high: [30., 30., 360.]  # deg
+      high:
+        - 30.0
+        - 30.0
+        - 360.0
+      low:
+        - -30.0
+        - -30.0
+        - -360.0
     omega:
-      low: [-10., -10., -10.]
-      high: [10., 10., 10.]
-  obs_des: [
-    0., 0., -5.,  # pos
-    0., 0., 0.,  # vel
-    0., 0., 0.,  # angles
-    0., 0., 0.,  # omega
-  ]
-  flat_Q: [
-    0.1, 0.1, 0.1,  # pos
-    0.01, 0.01, 0.01,  # vel
-    0.1, 0.1, 0.1,  # angles
-    0.01, 0.01, 0.01,  # omega
-  ]
-  flat_R: [0.1, 0.1, 0.1, 0.1]
-
-config:
-  env: "quadrotor"
-  framework: "torch"
-  num_gpus: 0
-  lr: 1.e-3
-  gamma: 0.99
-  disable_env_checking: True,
-
+      high:
+        - 10.0
+        - 10.0
+        - 10.0
+      low:
+        - -10.0
+        - -10.0
+        - -10.0
+    pos:
+      high:
+        - 5.0
+        - 5.0
+        - -5.0
+      low:
+        - -5.0
+        - -5.0
+        - -15.0
+    vel:
+      high:
+        - 5.0
+        - 5.0
+        - 5.0
+      low:
+        - -5.0
+        - -5.0
+        - -5.0
 tune:
-  run_or_experiment: "PPO"
+  checkpoint_at_end: true
+  checkpoint_freq: 30
+  local_dir: ./ray-results
+  num_samples: 10
+  run_or_experiment: PPO
   stop:
     training_iteration: 1000
-  local_dir: "./ray-results"
-  checkpoint_freq: 30
-  checkpoint_at_end: true
-  num_samples: 10

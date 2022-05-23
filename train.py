@@ -1,6 +1,5 @@
 from itertools import product
 
-import numpy as np
 import ray
 import yaml
 from loguru import logger
@@ -25,7 +24,13 @@ def main():
     candidate = [1e-4, 1e-3, 1e-2]
     env_config |= {"flat_Q_factor": tune.choice(list(product(*[candidate] * 4)))}
 
+    # add env_config to config
     tune_config["config"] |= {"env_config": env_config}
+
+    # register env
+    env.register()
+
+    # run
     tune.run(**tune_config)
 
     logger.info("Finish tune.run")

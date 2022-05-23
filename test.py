@@ -5,6 +5,7 @@ from loguru import logger
 from ray.rllib.agents import ppo
 from ray.tune import ExperimentAnalysis
 
+from src import env
 from src.env import QuadEnv
 
 with open("config.yaml", "r") as f:
@@ -57,6 +58,8 @@ def test():
 
 
 def main():
+    env.register()
+
     test()
 
 
