@@ -1,5 +1,3 @@
-from itertools import product
-
 import ray
 import yaml
 from loguru import logger
@@ -16,22 +14,10 @@ def main():
 
     logger.info("Strat tune.run")
 
-    tune_config = CONFIG["tune"] | {"config": CONFIG["config"]}
-
-    env_config = CONFIG["env_config"]
-
-    # make tune search space
-    candidate = [1e-4, 1e-3, 1e-2]
-    env_config |= {"flat_Q_factor": tune.choice(list(product(*[candidate] * 4)))}
-
-    # add env_config to config
-    tune_config["config"] |= {"env_config": env_config}
-
-    # register env
-    env.register()
-
     # run
-    tune.run(**tune_config)
+    config = CONFIG["config"]
+    tune_config = CONFIG["tune_config"]
+    tune.run(config=config, **tune_config)
 
     logger.info("Finish tune.run")
 
@@ -39,4 +25,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # register env
+    env.register()
     main()

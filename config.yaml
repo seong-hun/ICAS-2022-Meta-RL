@@ -1,66 +1,66 @@
 config:
-  disable_env_checking: True,
+  disable_env_checking: true
   env: quadrotor
+  env_config:
+    fkw:
+      dt: 0.01
+      max_t: 20
+    pos_des:
+      - 0.0
+      - 0.0
+      - -10.0
+    pos_init:
+      - 0.0
+      - 0.0
+      - -10.0
+    reward_weights:
+      action: 0.1
+      angles: 0.05
+      omega: 0.03
+      pos: 1
+      vel: 0.1
+    state_space:
+      angles:
+        high:
+          - 30.0
+          - 30.0
+          - 30.0
+        low:
+          - -30.0
+          - -30.0
+          - -30.0
+      omega:
+        high:
+          - 20.0
+          - 20.0
+          - 20.0
+        low:
+          - -20.0
+          - -20.0
+          - -20.0
+      pos:
+        high:
+          - 5.0
+          - 5.0
+          - -5.0
+        low:
+          - -5.0
+          - -5.0
+          - -15.0
+      vel:
+        high:
+          - 10.0
+          - 10.0
+          - 10.0
+        low:
+          - -10.0
+          - -10.0
+          - -10.0
   framework: torch
-  gamma: 0.99
+  gamma: 0.97
   lr: 0.001
   num_gpus: 0
-env_config:
-  fkw:
-    dt: 0.01
-    max_t: 20
-  pos_init:
-    - 0.0
-    - 0.0
-    - -5.0
-  pos_des:
-    - 0.0
-    - 0.0
-    - -5.0
-  reward_weights:
-    action: 0.1
-    angles: 0.05
-    omega: 0.03
-    pos: 1
-    vel: 0.1
-  state_space:
-    angles:
-      high:
-        - 30.0
-        - 30.0
-        - 360.0
-      low:
-        - -30.0
-        - -30.0
-        - -360.0
-    omega:
-      high:
-        - 10.0
-        - 10.0
-        - 10.0
-      low:
-        - -10.0
-        - -10.0
-        - -10.0
-    pos:
-      high:
-        - 5.0
-        - 5.0
-        - -5.0
-      low:
-        - -5.0
-        - -5.0
-        - -15.0
-    vel:
-      high:
-        - 5.0
-        - 5.0
-        - 5.0
-      low:
-        - -5.0
-        - -5.0
-        - -5.0
-tune:
+tune_config:
   checkpoint_at_end: true
   checkpoint_freq: 50
   local_dir: ./ray-results
