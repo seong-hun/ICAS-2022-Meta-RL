@@ -159,7 +159,12 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         # make a 2d vector from an 1d array
         rotorfs_cmd = np.float64(action[:, None])
         plant_info = self.plant.set_dot(t, rotorfs_cmd)
-        return self.observe_dict() | plant_info
+        return {
+            "t": t,
+            "rotorfs_cmd": rotorfs_cmd,
+            "plant_info": plant_info,
+            **self.observe_dict(),
+        }
 
     def observation(self):
         pos, vel, R, omega = self.plant.observe_list()
