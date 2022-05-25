@@ -137,11 +137,9 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         self.pos_des = np.array(env_config["pos_des"])[:, None]
 
         # reward weights
-        self.weights = {}
-        for key, val in env_config["state_space"].items():
-            self.weights[key] = 1 / max(*np.abs(val["low"]), *np.abs(val["high"])) / 3
-        self.weights["action"] = 1 / self.plant.rotorf_max / 4
-
+        self.weights = env_config["reward_weights"]
+        # for key, val in env_config["state_space"].items():
+        #     self.weights[key] = 1 / max(*np.abs(val["low"]), *np.abs(val["high"])) / 3
         self.reward_scale = self.clock.dt
 
         self.rng = np.random.default_rng()
@@ -152,6 +150,8 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         _, done = self.update(action=action)
         next_obs = self.observation()
         bounds_out = not self.state_space.contains(next_obs)
+        if bounds_out:
+            reward -= 1
         done = done or bounds_out
         return next_obs, reward, done, {}
 
@@ -173,18 +173,18 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         return np.float32(obs)
 
     def get_reward(self, action):
-        pos, vel, R, omega = self.plant.observe_list()
+        pos, vel, R, _ = self.plant.observe_list()
         angles = Rotation.from_matrix(R).as_euler("ZYX")[::-1]
 
-        # hovering reward
-        reward = 5
-        reward += max(0, 1 - np.sum(np.abs(pos - self.pos_des)))
-        reward += -np.sum(np.abs(vel)) * self.weights["vel"]
-        reward += -np.sum(np.abs(angles)) * self.weights["angles"]
-        reward += -np.sum(np.abs(omega)) * self.weights["omega"]
+        # position error
+        pe = np.linalg.norm(pos - self.pos_des)
 
-        # reward for low control effort
-        reward += -np.sum(action**2) * self.weights["action"]
+        # hovering reward
+        reward = 0
+        reward += -pe * self.weights["pos"]
+        reward += -np.linalg.norm(vel) * self.weights["vel"]
+        reward += -np.linalg.norm(angles) * self.weights["angles"]
+        reward += -np.linalg.norm(action) * self.weights["action"] / max(pe, 1e-1)
 
         # scaling
         reward *= self.reward_scale

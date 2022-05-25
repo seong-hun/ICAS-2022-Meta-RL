@@ -3,8 +3,8 @@ config:
   env: quadrotor
   env_config:
     fkw:
-      dt: 0.01
-      max_t: 20
+      dt: 0.02
+      max_t: 6
     pos_des:
       - 0.0
       - 0.0
@@ -14,11 +14,10 @@ config:
       - 0.0
       - -10.0
     reward_weights:
-      action: 0.1
-      angles: 0.05
-      omega: 0.03
+      action: 0.01
+      angles: 0.1
       pos: 1
-      vel: 0.1
+      vel: 0.2
     state_space:
       angles:
         high:

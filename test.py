@@ -39,6 +39,9 @@ def test(trial):
         raise ValueError("Cannot find a trial")
 
     config = trial.config
+
+    logger.info(config)
+
     checkpoint = trial.checkpoint.value
 
     logger.info(f"Using checkpoint: {checkpoint}")
@@ -49,7 +52,9 @@ def test(trial):
 
     # make env
     testpath = Path(checkpoint).parent / "test-flight.h5"
-    env = QuadEnv(config["env_config"])
+    env_config = config["env_config"]
+    env_config["fkw"]["max_t"] = 20
+    env = QuadEnv(env_config)
     env.logger = fym.Logger(path=testpath)
 
     logger.info("Start test flight")
