@@ -14,7 +14,7 @@ config:
       - 0.0
       - -10.0
     reward_weights:
-      action: 0.01
+      action: 0.002
       angles: 0.1
       pos: 1
       vel: 0.2

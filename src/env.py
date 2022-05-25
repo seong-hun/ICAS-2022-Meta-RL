@@ -151,7 +151,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         next_obs = self.observation()
         bounds_out = not self.state_space.contains(next_obs)
         if bounds_out:
-            reward -= 1
+            reward += -1
         done = done or bounds_out
         return next_obs, reward, done, {}
 
@@ -184,7 +184,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         reward += -pe * self.weights["pos"]
         reward += -np.linalg.norm(vel) * self.weights["vel"]
         reward += -np.linalg.norm(angles) * self.weights["angles"]
-        reward += -np.linalg.norm(action) * self.weights["action"] / max(pe, 1e-1)
+        reward += -np.linalg.norm(action) * self.weights["action"]
 
         # scaling
         reward *= self.reward_scale
