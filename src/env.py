@@ -3,7 +3,6 @@ import gym
 import numpy as np
 from fym.utils.rot import hat
 from gym import spaces
-from ray.tune.registry import register_env
 from scipy.spatial.transform import Rotation
 
 
@@ -57,7 +56,7 @@ class Multicopter(fym.BaseEnv):
 
     def __init__(self):
         super().__init__()
-        self.pos = fym.BaseSystem(np.vstack((0, 0, -2)))
+        self.pos = fym.BaseSystem(np.vstack((0, 0, -10)))
         self.vel = fym.BaseSystem(np.zeros((3, 1)))
         self.R = fym.BaseSystem(np.eye(3))
         self.omega = fym.BaseSystem(np.zeros((3, 1)))
@@ -92,6 +91,8 @@ class Multicopter(fym.BaseEnv):
 
 
 class QuadEnv(fym.BaseEnv, gym.Env):
+    """Environment for inner-loop RL training."""
+
     def __init__(self, env_config):
         super().__init__(**env_config["fkw"])
         self.plant = Multicopter()
@@ -138,9 +139,10 @@ class QuadEnv(fym.BaseEnv, gym.Env):
 
         # reward weights
         self.weights = env_config["reward_weights"]
-        # for key, val in env_config["state_space"].items():
-        #     self.weights[key] = 1 / max(*np.abs(val["low"]), *np.abs(val["high"])) / 3
         self.reward_scale = self.clock.dt
+
+        # for task setup
+        self._tasks = env_config["tasks"]
 
         self.rng = np.random.default_rng()
 
@@ -167,9 +169,17 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         }
 
     def observation(self):
-        pos, vel, R, omega = self.plant.observe_list()
-        angles = Rotation.from_matrix(R).as_euler("ZYX")[::-1]
-        obs = np.hstack((pos.ravel(), vel.ravel(), angles, omega.ravel()))
+        _, vel, R, omega = self.plant.observe_list()
+
+        vz = vel.ravel()[2]
+
+        # fixed acc command directing -e3 for inner-loop RL
+        n_i = -self.plant.e3
+        n_b = R.T @ n_i
+        eta = n_b.ravel()[:2]
+
+        obs = np.hstack((vz, eta, omega))
+
         return np.float32(obs)
 
     def get_reward(self, action):
@@ -211,6 +221,53 @@ class QuadEnv(fym.BaseEnv, gym.Env):
 
         return self.observation()
 
+    def get_task(self, random=True, **kwargs):
+        # default task
+        task = {
+            "rf": np.ones(4),  # rotor faults (0: complete failure, 1: healthy)
+            "fi": (),  # fault index
+            "mf": 1,  # loss of mass
+            "Jf": np.ones(3),  # loss of J
+            "fv": 0.5,  # free variable
+        }
 
-def register():
-    register_env("quadrotor", lambda env_config: QuadEnv(env_config))
+        # update with random task
+        if random:
+            rng = self.rng
+
+            rand_rf = np.ones(4)
+            rand_fi = tuple(
+                sorted(
+                    rng.choice(
+                        range(4),
+                        rng.integers(1, self._tasks["max_frotors"] + 1),
+                        replace=False,
+                    )
+                )
+            )
+            for i in rand_fi:
+                rand_rf[i] = rng.uniform(*self._tasks["rfrange"])
+
+            task |= {
+                "rf": rand_rf,
+                "fi": rand_fi,
+                "mf": rng.uniform(*self._tasks["mfrange"]),
+                "Jf": rng.uniform(*self._tasks["Jfrange"], size=3),
+                "fv": rng.uniform(*self._tasks["fvrange"]),
+            }
+
+        # update with given task
+        task |= kwargs
+
+        # update fault index to match rotor faults (rf)
+        task["fi"] = tuple(
+            i for i, v in enumerate(task["rf"]) if v <= self._tasks["rfrange"][1]
+        )
+
+        return task
+
+    def set_task(self, task):
+        self.plant.Lambda = np.diag(task["rf"])
+        self.plant.m *= task["mf"]
+        self.plant.J = np.diag(task["Jf"]) @ self.plant.J
+        self.task = task

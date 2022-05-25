@@ -1,69 +1,68 @@
-config:
-  disable_env_checking: true
-  env: quadrotor
-  env_config:
-    fkw:
-      dt: 0.02
-      max_t: 6
-    pos_des:
+env_config:
+  fkw:
+    dt: 0.02
+    max_t: 6
+  pos_des:
+    - 0.0
+    - 0.0
+    - -10.0
+  pos_init:
+    - 0.0
+    - 0.0
+    - -10.0
+  reward_weights:
+    action: 0.002
+    angles: 0.1
+    pos: 1
+    vel: 0.2
+  state_space:
+    angles:
+      high:
+        - 30.0
+        - 30.0
+        - 30.0
+      low:
+        - -30.0
+        - -30.0
+        - -30.0
+    omega:
+      high:
+        - 20.0
+        - 20.0
+        - 20.0
+      low:
+        - -20.0
+        - -20.0
+        - -20.0
+    pos:
+      high:
+        - 5.0
+        - 5.0
+        - -5.0
+      low:
+        - -5.0
+        - -5.0
+        - -15.0
+    vel:
+      high:
+        - 10.0
+        - 10.0
+        - 10.0
+      low:
+        - -10.0
+        - -10.0
+        - -10.0
+  tasks:
+    Jfrange:
+      - 0.8
+      - 1.2
+    fvrange:
       - 0.0
+      - 0.6
+    max_frotors: 2
+    mfrange:
+      - 0.8
+      - 1.2
+    rfrange:
       - 0.0
-      - -10.0
-    pos_init:
-      - 0.0
-      - 0.0
-      - -10.0
-    reward_weights:
-      action: 0.002
-      angles: 0.1
-      pos: 1
-      vel: 0.2
-    state_space:
-      angles:
-        high:
-          - 30.0
-          - 30.0
-          - 30.0
-        low:
-          - -30.0
-          - -30.0
-          - -30.0
-      omega:
-        high:
-          - 20.0
-          - 20.0
-          - 20.0
-        low:
-          - -20.0
-          - -20.0
-          - -20.0
-      pos:
-        high:
-          - 5.0
-          - 5.0
-          - -5.0
-        low:
-          - -5.0
-          - -5.0
-          - -15.0
-      vel:
-        high:
-          - 10.0
-          - 10.0
-          - 10.0
-        low:
-          - -10.0
-          - -10.0
-          - -10.0
-  framework: torch
-  gamma: 0.97
-  lr: 0.001
-  num_gpus: 0
-tune_config:
-  checkpoint_at_end: true
-  checkpoint_freq: 50
-  local_dir: ./ray-results
-  num_samples: 10
-  run_or_experiment: PPO
-  stop:
-    training_iteration: 10000
+      - 0.4
