@@ -64,21 +64,19 @@ env_config:
       - 0.4
 tune:
   config:
-    alpha: 0.2,
-    autotune: True,
-    batch_size: 256,
-    buffer_size: 1e6,
-    env_config: CONFIG["env_config"],
-    learning_starts: 5e3,
-    log_std_max: 2,
-    log_std_min: -5,
-    n_envs: 5,
-    policy_frequency: 2,
+    alpha: 0.2
+    batch_size: 256
+    buffer_size: 1000000
+    learning_starts: 5000
+    log_std_max: 2
+    log_std_min: -5
+    n_envs: 5
+    policy_frequency: 2
     rf:
       - 1
       - 1
       - 1
       - 0
-    target_network_frequency: 1,
-    tau: 0.005,
-    total_timesteps: 1e6,
+    target_network_frequency: 1
+    tau: 0.005
+    total_timesteps: 20000

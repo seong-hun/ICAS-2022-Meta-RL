@@ -1,3 +1,4 @@
+import os
 import random
 import time
 
@@ -150,8 +151,21 @@ def sac_trainable(config, checkpoint_dir=None):
     alpha = log_alpha.exp().item()
     a_optimizer = optim.Adam([log_alpha], lr=config["q_lr"])
 
+    # load from the past checkpoint
+    if checkpoint_dir:
+        checkpoint = os.path.join(checkpoint_dir, "checkpoint")
+        state = torch.load(checkpoint)
+        actor.load_state_dict(state["actor"])
+        qf1.load_state_dict(state["qf1"])
+        qf2.load_state_dict(state["qf2"])
+        actor_optimizer.load_state_dict(state["actor_optimizer"])
+        q_optimizer.load_state_dict(state["q_optimizer"])
+        a_optimizer.load_state_dict(state["a_optimizer"])
+
+    # gamma from mgamma
     gamma = 1 - config["mgamma"]
 
+    # create a replay buffer for off-policy RLs
     rb = ReplayBuffer(
         buffer_size=int(config["buffer_size"]),
         observation_space=envs.observation_space,
@@ -290,6 +304,23 @@ def sac_trainable(config, checkpoint_dir=None):
                         )
                         break
 
+            # Save the model into a checkpoint
+            if global_step % (config["total_timesteps"] // 20) == 0:
+                with tune.checkpoint_dir(step=global_step) as checkpoint_dir:
+                    path = os.path.join(checkpoint_dir, "checkpoint")
+                    torch.save(
+                        {
+                            "actor": actor.state_dict(),
+                            "qf1": qf1.state_dict(),
+                            "qf2": qf2.state_dict(),
+                            "actor_optimizer": actor_optimizer.state_dict(),
+                            "q_optimizer": q_optimizer.state_dict(),
+                            "a_optimizer": a_optimizer.state_dict(),
+                            "global_step": global_step,
+                        },
+                        path,
+                    )
+
     envs.close()
     writer.close()
 
@@ -302,20 +333,8 @@ def hyperparam_tune():
         "q_lr": tune.loguniform(1e-4, 1e-2),
         "policy_lr": tune.loguniform(1e-4, 1e-2),
         "fault_occurs": tune.grid_search([True, False]),
-        "rf": np.array([1, 1, 1, 0]),  # rotor fault
-        "n_envs": 5,
-        "buffer_size": 1e6,
-        "batch_size": 256,
-        "total_timesteps": 1e6,
-        "learning_starts": 5e3,  # timestep to start learning
-        "policy_frequency": 2,  # the frequency of training policy (delayed)
-        "target_network_frequency": 1,  # the frequency of updates for the target nerworks
-        "autotune": True,  # automatic tuning of the entropy coefficient
-        "alpha": 0.2,  # entropy regularization coefficient
         "env_config": CONFIG["env_config"],
-        "log_std_max": 2,
-        "log_std_min": -5,
-        "tau": 0.005,  # target smoothing coefficient
+        **CONFIG["tune"]["config"],
     }
     tune_config = {
         "config": config,
@@ -338,6 +357,8 @@ def train_sac():
         "mgamma": 0.00518,
         "policy_lr": 0.000613,
         "q_lr": 0.00471,
+        "env_config": CONFIG["env_config"],
+        **CONFIG["tune"]["config"],
     }
     tune_config = {
         "config": config,
@@ -356,6 +377,7 @@ def train_sac():
         "mgamma": 0.032,
         "policy_lr": 0.00392,
         "q_lr": 0.00957,
+        "env_config": CONFIG["env_config"],
         **CONFIG["tune"]["config"],
     }
     tune_config = {
@@ -364,6 +386,10 @@ def train_sac():
         "local_dir": "./exp/origin-hover/SAC/train",
         "name": "fault",
     }
+
+    ray.init()
+    tune.run(sac_trainable, **tune_config)
+    ray.shutdown()
 
 
 if __name__ == "__main__":
