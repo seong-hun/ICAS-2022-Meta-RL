@@ -1,57 +1,53 @@
 env_config:
+  LQR:
+    Q:
+      - 1
+      - 20
+      - 20
+      - 1
+      - 1
+      - 1
+    R:
+      - 1
+      - 1
+      - 1
+      - 1
   fkw:
     dt: 0.02
     max_t: 6
+  observation_space:
+    eta:
+      high:
+        - 0.3
+        - 0.3
+      low:
+        - -0.3
+        - -0.3
+    omega:
+      high:
+        - 30.0
+        - 30.0
+        - 30.0
+      low:
+        - -30.0
+        - -30.0
+        - -30.0
+    vz:
+      high: 0.0
+      low: -10.0
   pos_des:
     - 0.0
     - 0.0
-    - -10.0
+    - -5.0
   pos_init:
     - 0.0
     - 0.0
-    - -10.0
+    - -5.0
   reward_weights:
     action: 0.002
     angles: 0.1
     pos: 1
     vel: 0.2
-  state_space:
-    angles:
-      high:
-        - 30.0
-        - 30.0
-        - 30.0
-      low:
-        - -30.0
-        - -30.0
-        - -30.0
-    omega:
-      high:
-        - 20.0
-        - 20.0
-        - 20.0
-      low:
-        - -20.0
-        - -20.0
-        - -20.0
-    pos:
-      high:
-        - 5.0
-        - 5.0
-        - -5.0
-      low:
-        - -5.0
-        - -5.0
-        - -15.0
-    vel:
-      high:
-        - 10.0
-        - 10.0
-        - 10.0
-      low:
-        - -10.0
-        - -10.0
-        - -10.0
   tasks:
     Jfrange:
       - 0.8
@@ -66,3 +62,23 @@ env_config:
     rfrange:
       - 0.0
       - 0.4
+tune:
+  config:
+    alpha: 0.2,
+    autotune: True,
+    batch_size: 256,
+    buffer_size: 1e6,
+    env_config: CONFIG["env_config"],
+    learning_starts: 5e3,
+    log_std_max: 2,
+    log_std_min: -5,
+    n_envs: 5,
+    policy_frequency: 2,
+    rf:
+      - 1
+      - 1
+      - 1
+      - 0
+    target_network_frequency: 1,
+    tau: 0.005,
+    total_timesteps: 1e6,

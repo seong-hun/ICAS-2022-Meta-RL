@@ -12,6 +12,7 @@ import yaml
 from loguru import logger
 from ray import tune
 from stable_baselines3.common.buffers import ReplayBuffer
+from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 from torch.utils.tensorboard.writer import SummaryWriter
 
 from src.env import QuadEnv
@@ -20,19 +21,35 @@ with open("config.yaml", "r") as f:
     CONFIG = yaml.load(f, Loader=yaml.SafeLoader)
 
 
+def make_env(config):
+    def wrapper():
+        # make env
+        env = QuadEnv(config["env_config"])
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        if config["fault_occurs"]:
+            # set LoE fault (task)
+            task = env.get_task(rf=config["rf"], random=False)
+        else:
+            task = env.get_task(random=False)
+        env.set_task(task)
+        return env
+
+    return wrapper
+
+
 class Actor(nn.Module):
     def __init__(self, env, config):
         super().__init__()
-        self.fc1 = nn.Linear(np.array(env.single_observation_space.shape).prod(), 256)
+        self.fc1 = nn.Linear(np.array(env.observation_space.shape).prod(), 256)
         self.fc2 = nn.Linear(256, 256)
-        self.fc_mean = nn.Linear(256, np.prod(env.single_action_space.shape))
-        self.fc_logstd = nn.Linear(256, np.prod(env.single_action_space.shape))
+        self.fc_mean = nn.Linear(256, np.prod(env.action_space.shape))
+        self.fc_logstd = nn.Linear(256, np.prod(env.action_space.shape))
         # action rescaling
-        self.action_scalqe = torch.FloatTensor(
-            (env.single_action_space.high - env.single_action_space.low) / 2.0
+        self.action_scale = torch.FloatTensor(
+            (env.action_space.high - env.action_space.low) / 2.0
         )
         self.action_bias = torch.FloatTensor(
-            (env.single_action_space.high + env.single_action_space.low) / 2.0
+            (env.action_space.high + env.action_space.low) / 2.0
         )
 
         self.log_std_min = config["log_std_min"]
@@ -73,8 +90,8 @@ class SoftQNetwork(nn.Module):
     def __init__(self, env):
         super().__init__()
         self.fc1 = nn.Linear(
-            np.array(env.single_observation_space.shape).prod()
-            + np.prod(env.single_action_space.shape),
+            np.array(env.observation_space.shape).prod()
+            + np.prod(env.action_space.shape),
             256,
         )
         self.fc2 = nn.Linear(256, 256)
@@ -88,35 +105,28 @@ class SoftQNetwork(nn.Module):
         return x
 
 
-def make_env(config):
-    def wrapper():
-        # make env
-        env = QuadEnv(config["env_config"])
-        # set LoE fault (task)
-        task = env.get_task(rf=config["rf"], random=False)
-        env.set_task(task)
-        return env
+def sac_trainable(config, checkpoint_dir=None):
+    """Ray.tune functional trainable method"""
 
-    return wrapper
-
-
-def train_sac(config):
-    run_name = f"{config['exp_name']}__{config['seed']}__{int(time.time())}"
-    writer = SummaryWriter(f"runs/{run_name}")
+    writer = SummaryWriter("runs")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s"
         % ("\n".join([f"|{key}|{value}|" for key, value in config.items()])),
     )
 
+    # seeding
+    seed = config["seed"]
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # make vectorized multiple envs for averaging the results
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(config) for _ in range(config["num_envs_for_each_trial"])]
-    )
+    envs = DummyVecEnv([make_env(config) for _ in range(config["n_envs"])])
 
-    actor = Actor(envs, config["actor_config"])
+    actor = Actor(envs, config)
 
     # setup networks
     qf1 = SoftQNetwork(envs).to(device)
@@ -134,28 +144,31 @@ def train_sac(config):
 
     # with autotune = True
     target_entropy = -torch.prod(
-        torch.Tensor(envs.single_action_space.shape).to(device)
+        torch.Tensor(envs.action_space.shape).to(device)
     ).item()
     log_alpha = torch.zeros(1, requires_grad=True, device=device)
     alpha = log_alpha.exp().item()
     a_optimizer = optim.Adam([log_alpha], lr=config["q_lr"])
 
+    gamma = 1 - config["mgamma"]
+
     rb = ReplayBuffer(
-        config["buffer_size"],
-        envs.single_observation_space,
-        envs.single_action_space,
-        device,
+        buffer_size=int(config["buffer_size"]),
+        observation_space=envs.observation_space,
+        action_space=envs.action_space,
+        device=device,
+        n_envs=config["n_envs"],
         handle_timeout_termination=True,
     )
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
     obs = envs.reset()
-    for global_step in range(config["total_timesteps"]):
+    for global_step in range(int(config["total_timesteps"])):
         # ALGO LOGIC: put action logic here
         if global_step < config["learning_starts"]:
             actions = np.array(
-                [envs.single_action_space.sample() for _ in range(envs.num_envs)]
+                [envs.action_space.sample() for _ in range(envs.num_envs)]
             )
         else:
             actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
@@ -163,20 +176,6 @@ def train_sac(config):
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, dones, infos = envs.step(actions)
-
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
-        for info in infos:
-            if "episode" in info.keys():
-                print(
-                    f"global_step={global_step}, episodic_return={info['episode']['r']}"
-                )
-                writer.add_scalar(
-                    "charts/episodic_return", info["episode"]["r"], global_step
-                )
-                writer.add_scalar(
-                    "charts/episodic_length", info["episode"]["l"], global_step
-                )
-                break
 
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
         real_next_obs = next_obs.copy()
@@ -190,7 +189,7 @@ def train_sac(config):
 
         # ALGO LOGIC: training.
         if global_step > config["learning_starts"]:
-            data = rb.sample(config["batch_size"])
+            data = rb.sample(int(config["batch_size"]))
             with torch.no_grad():
                 next_state_actions, next_state_log_pi, _ = actor.get_action(
                     data.next_observations
@@ -203,7 +202,7 @@ def train_sac(config):
                 )
                 next_q_value = data.rewards.flatten() + (
                     1 - data.dones.flatten()
-                ) * config["gamma"] * (min_qf_next_target).view(-1)
+                ) * gamma * (min_qf_next_target).view(-1)
 
             qf1_a_values = qf1(data.observations, data.actions).view(-1)
             qf2_a_values = qf2(data.observations, data.actions).view(-1)
@@ -258,6 +257,7 @@ def train_sac(config):
                         + (1 - config["tau"]) * target_param.data
                     )
 
+            # write to writer
             if global_step % 100 == 0:
                 writer.add_scalar(
                     "losses/qf1_values", qf1_a_values.mean().item(), global_step
@@ -279,28 +279,33 @@ def train_sac(config):
                 # with autotune = True
                 writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
+                # TRY NOT TO MODIFY: record rewards for plotting purposes
+                for info in infos:
+                    if "episode" in info.keys():
+                        writer.add_scalar(
+                            "charts/episodic_return", info["episode"]["r"], global_step
+                        )
+                        writer.add_scalar(
+                            "charts/episodic_length", info["episode"]["l"], global_step
+                        )
+                        break
+
     envs.close()
     writer.close()
 
 
-def main():
-    # seeding
-    seed = CONFIG["seed"]
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
+def hyperparam_tune():
     # setup tune search space
     config = {
-        "exp_name": "SAC",
-        "seed": 0,
-        "gamma": tune.choice([0.999, 0.995, 0.99, 0.98, 0.97]),
+        "seed": tune.randint(0, 100000),
+        "mgamma": tune.loguniform(1e-1, 1e-3),  # gamma = 1 - mgamma
         "q_lr": tune.loguniform(1e-4, 1e-2),
         "policy_lr": tune.loguniform(1e-4, 1e-2),
         "fault_occurs": tune.grid_search([True, False]),
         "rf": np.array([1, 1, 1, 0]),  # rotor fault
-        "num_envs_for_each_trial": 5,
+        "n_envs": 5,
         "buffer_size": 1e6,
+        "batch_size": 256,
         "total_timesteps": 1e6,
         "learning_starts": 5e3,  # timestep to start learning
         "policy_frequency": 2,  # the frequency of training policy (delayed)
@@ -314,19 +319,53 @@ def main():
     }
     tune_config = {
         "config": config,
-        "num_samples": 10,
-        "local_dir": "./ray-results",
+        "num_samples": 32,
+        "local_dir": "./exp/origin-hover/SAC",
+        "name": "hyperparam-tune",
     }
 
     # tune
-    logger.info("Start tune.run")
-
     ray.init()
-    analysis = tune.run(train_sac, **tune_config)
+    tune.run(sac_trainable, **tune_config)
     ray.shutdown()
 
-    logger.info("Finish tune.run")
+
+def train_sac():
+    # best hyperparamters finding from ``hyperparam_tune()``
+    config = {
+        "seed": tune.randint(0, 100000),
+        "fault_occurs": False,
+        "mgamma": 0.00518,
+        "policy_lr": 0.000613,
+        "q_lr": 0.00471,
+    }
+    tune_config = {
+        "config": config,
+        "num_samples": 10,
+        "local_dir": "./exp/origin-hover/SAC/train",
+        "name": "normal",
+    }
+
+    ray.init()
+    tune.run(sac_trainable, **tune_config)
+    ray.shutdown()
+
+    config = {
+        "seed": tune.randint(0, 100000),
+        "fault_occurs": True,
+        "mgamma": 0.032,
+        "policy_lr": 0.00392,
+        "q_lr": 0.00957,
+        **CONFIG["tune"]["config"],
+    }
+    tune_config = {
+        "config": config,
+        "num_samples": 10,
+        "local_dir": "./exp/origin-hover/SAC/train",
+        "name": "fault",
+    }
 
 
 if __name__ == "__main__":
-    main()
+    # hyperparam_tune()
+    train_sac()

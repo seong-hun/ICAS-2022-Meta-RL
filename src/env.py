@@ -1,3 +1,5 @@
+from typing import Union
+
 import fym
 import gym
 import numpy as np
@@ -97,11 +99,30 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         super().__init__(**env_config["fkw"])
         self.plant = Multicopter()
 
+        # setup initial position
         self.plant.pos.initial_state = np.array(env_config["pos_init"])[:, None]
 
-        # observation: pos (3), vel (3), angles (3), omega (3)
+        # observation: vz (1), eta (2), omega (3) -- TOTAL: 6
         self.observation_space = spaces.Box(
-            -np.inf, np.inf, shape=(12,), dtype=np.float32
+            low=np.float32(
+                np.hstack(
+                    [
+                        env_config["observation_space"]["vz"]["low"],
+                        env_config["observation_space"]["eta"]["low"],
+                        env_config["observation_space"]["omega"]["low"],
+                    ]
+                )
+            ),
+            high=np.float32(
+                np.hstack(
+                    [
+                        env_config["observation_space"]["vz"]["high"],
+                        env_config["observation_space"]["eta"]["high"],
+                        env_config["observation_space"]["omega"]["high"],
+                    ]
+                )
+            ),
+            dtype=np.float32,
         )
         # action: rotorfs (4)
         self.action_space = spaces.Box(
@@ -110,35 +131,10 @@ class QuadEnv(fym.BaseEnv, gym.Env):
             shape=(4,),
             dtype=np.float32,
         )
-        # state space for checking unwanted state
-        self.state_space = spaces.Box(
-            low=np.float32(
-                np.hstack(
-                    [
-                        env_config["state_space"]["pos"]["low"],
-                        env_config["state_space"]["vel"]["low"],
-                        np.deg2rad(env_config["state_space"]["angles"]["low"]),
-                        env_config["state_space"]["omega"]["low"],
-                    ]
-                )
-            ),
-            high=np.float32(
-                np.hstack(
-                    [
-                        env_config["state_space"]["pos"]["high"],
-                        env_config["state_space"]["vel"]["high"],
-                        np.deg2rad(env_config["state_space"]["angles"]["high"]),
-                        env_config["state_space"]["omega"]["high"],
-                    ]
-                )
-            ),
-        )
 
-        # the desired obs for the LQR cost
-        self.pos_des = np.array(env_config["pos_des"])[:, None]
-
-        # reward weights
-        self.weights = env_config["reward_weights"]
+        # reward (LQR)
+        self.LQR_Q = np.diag(env_config["LQR"]["Q"])
+        self.LQR_R = np.diag(env_config["LQR"]["R"])
         self.reward_scale = self.clock.dt
 
         # for task setup
@@ -151,7 +147,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         reward = self.get_reward(action)
         _, done = self.update(action=action)
         next_obs = self.observation()
-        bounds_out = not self.state_space.contains(next_obs)
+        bounds_out = not self.observation_space.contains(next_obs)
         if bounds_out:
             reward += -1
         done = done or bounds_out
@@ -168,7 +164,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
             **self.observe_dict(),
         }
 
-    def observation(self):
+    def observation(self, dtype=None):
         _, vel, R, omega = self.plant.observe_list()
 
         vz = vel.ravel()[2]
@@ -178,23 +174,17 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         n_b = R.T @ n_i
         eta = n_b.ravel()[:2]
 
-        obs = np.hstack((vz, eta, omega))
+        obs = np.hstack((vz, eta, omega.ravel()))
 
-        return np.float32(obs)
+        dtype = dtype or np.float32
+        return dtype(obs)
 
     def get_reward(self, action):
-        pos, vel, R, _ = self.plant.observe_list()
-        angles = Rotation.from_matrix(R).as_euler("ZYX")[::-1]
-
-        # position error
-        pe = np.linalg.norm(pos - self.pos_des)
+        obs = self.observation(dtype=np.float64)[:, None]
+        action = action[:, None]
 
         # hovering reward
-        reward = 0
-        reward += -pe * self.weights["pos"]
-        reward += -np.linalg.norm(vel) * self.weights["vel"]
-        reward += -np.linalg.norm(angles) * self.weights["angles"]
-        reward += -np.linalg.norm(action) * self.weights["action"]
+        reward = -(+obs.T @ self.LQR_Q @ obs + action.T @ self.LQR_R @ action).ravel()
 
         # scaling
         reward *= self.reward_scale
@@ -207,19 +197,23 @@ class QuadEnv(fym.BaseEnv, gym.Env):
             obs = with_obs
         else:
             # randomly perturbate the state
-            # obs = np.float64(self.state_space.sample())
-            obs = self.observation()
+            # obs = np.float64(self.observation_space.sample())
+            obs = self.observation(dtype=np.float64)
 
         # set states from obs
-        self.plant.pos.state = obs[:3][:, None]
-        self.plant.vel.state = obs[3:6][:, None]
-        self.plant.R.state = Rotation.from_euler("ZYX", obs[6:9][::-1]).as_matrix()
-        self.plant.omega.state = obs[9:12][:, None]
+        pos, vel, R, omega = self.obs2state(obs)
+
+        self.plant.pos.state = pos
+        self.plant.vel.state = vel
+        self.plant.R.state = R
+        self.plant.omega.state = omega
+
+        obs = self.observation()
 
         # check the state space contains the random state
-        assert self.state_space.contains(self.observation())
+        assert self.observation_space.contains(obs), breakpoint()
 
-        return self.observation()
+        return obs
 
     def get_task(self, random=True, **kwargs):
         # default task
@@ -271,3 +265,30 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         self.plant.m *= task["mf"]
         self.plant.J = np.diag(task["Jf"]) @ self.plant.J
         self.task = task
+
+    def eta2R(self, eta):
+        n3 = np.vstack((eta, -np.sqrt(1 - (eta**2).sum())))
+        e3 = np.vstack((0, 0, 1))
+
+        RT = np.zeros((3, 3))
+        e3xn3 = cross(e3, n3)
+        if np.all(np.isclose(e3xn3, 0)):
+            e3xn3 = np.vstack((0, 1, 0))
+        RT[:, 0:1] = -cross(e3xn3, n3)
+        RT[:, 1:2] = e3xn3
+        RT[:, 2:3] = -n3
+
+        R = RT.T
+        return R
+
+    def obs2state(self, obs):
+        """Convert observation to pos, vel, R, omega."""
+        vz = obs[0]
+        eta = obs[1:3][:, None]
+        omega = obs[3:][:, None]
+
+        pos = np.zeros((3, 1))
+        vel = np.vstack((0, 0, vz))
+        R = self.eta2R(eta)
+
+        return pos, vel, R, omega
