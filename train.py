@@ -139,17 +139,23 @@ class SAC(nn.Module):
         self.alpha = self.log_alpha.exp().item()
         self.a_optimizer = optim.Adam([self.log_alpha], lr=config["q_lr"])
 
-    def get_action(self, obs):
+    def get_action(self, obs, deterministic=False):
         assert isinstance(obs, np.ndarray)
         if obs.ndim == 1:
-            action, *_ = self.actor(torch.Tensor(obs).to(device)[None])
+            action, _, mean = self.actor(torch.Tensor(obs).to(device)[None])
             action = action.detach().cpu().numpy()[0]
+            mean = mean.detach().cpu().numpy()[0]
         elif obs.ndim == 2:
-            action, *_ = self.actor(torch.Tensor(obs).to(device))
+            action, _, mean = self.actor(torch.Tensor(obs).to(device))
             action = action.detach().cpu().numpy()
+            mean = mean.detach().cpu().numpy()
         else:
             raise ValueError
-        return action
+
+        if deterministic:
+            return mean
+        else:
+            return action
 
 
 def sac_trainable(config, checkpoint_dir=None):
@@ -454,7 +460,7 @@ def get_trial(fault_occurs=False, nid=None):
 
 def test_sac():
     # get a checkpoint
-    trial = get_trial(fault_occurs=False)
+    trial = get_trial(fault_occurs=True)
     config = trial.config
     assert trial.logdir is not None
     testpath = Path(trial.logdir) / "test-flight.h5"
@@ -472,20 +478,20 @@ def test_sac():
     # make a policy
     policy = SAC(env, config)
     policy.to(device)
-
     # load policy from the checkpoint
     checkpoint = os.path.join(trial.checkpoint.value, "checkpoint")
     state = torch.load(checkpoint)
     policy.load_state_dict(state["policy"])
+    policy.eval()
 
     # start testing
     episode_reward = 0
     done = False
-    obs = env.reset(mode="neighbor")
+    obs = env.reset(mode="initial")
 
     while not done:
         env.render()
-        action = policy.get_action(obs)
+        action = policy.get_action(obs, deterministic=True)
         obs, reward, done, _ = env.step(action)
         episode_reward += reward
 
