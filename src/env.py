@@ -218,8 +218,8 @@ class PIDOuterLoop:
         pos_ref = self.get_pos_ref(t)
         pos_error = (pos_ref - pos).ravel()
         self.PID_x.update(pos_error[0])
-        self.PID_x.update(pos_error[1])
-        self.PID_x.update(pos_error[2])
+        self.PID_y.update(pos_error[1])
+        self.PID_z.update(pos_error[2])
 
 
 class QuadEnv(fym.BaseEnv):
