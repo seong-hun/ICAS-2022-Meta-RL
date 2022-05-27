@@ -202,12 +202,12 @@ class PIDOuterLoop:
 
     def get(self, pos):
         t = self.clock.get()
-        pos = pos.ravel()
-        pos_ref = self.get_pos_ref(t).ravel()
+        pos_ref = self.get_pos_ref(t)
+        pos_error = (pos_ref - pos).ravel()
 
-        ax_des = self.PID_x.get(pos_ref[0] - pos[0])
-        ay_des = self.PID_y.get(pos_ref[1] - pos[1])
-        az_des = self.PID_z.get(pos_ref[2] - pos[2])
+        ax_des = self.PID_x.get(pos_error[0])
+        ay_des = self.PID_y.get(pos_error[1])
+        az_des = self.PID_z.get(pos_error[2])
         a_des = np.vstack((ax_des, ay_des, az_des))
 
         F_des_i = self.m * (a_des - self.g * self.e3)
@@ -216,7 +216,7 @@ class PIDOuterLoop:
     def update(self, pos):
         t = self.clock.get()
         pos_ref = self.get_pos_ref(t)
-        pos_error = (pos - pos_ref).ravel()
+        pos_error = (pos_ref - pos).ravel()
         self.PID_x.update(pos_error[0])
         self.PID_x.update(pos_error[1])
         self.PID_x.update(pos_error[2])
@@ -320,6 +320,11 @@ class QuadEnv(fym.BaseEnv):
         # -- BEFORE UPDATE
         obs = self.observation()
         pos = self.plant.pos.state
+
+        # Update the action in line with the desired total thrust
+        F_des_i = self.outer.get(pos)
+        F_des_norm = np.linalg.norm(F_des_i)
+        action = (F_des_norm - sum(action)) * np.ones(4) / 4 + action
 
         # -- UPDATE
         # ``info`` contains ``t`` and ``state_dict``
