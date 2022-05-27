@@ -245,9 +245,9 @@ def sac_trainable(config, checkpoint_dir=None):
                     torch.min(qf1_next_target, qf2_next_target)
                     - policy.alpha * next_state_log_pi
                 )
-                next_q_value = data.rewards.flatten() + (
-                    1 - data.dones.flatten()
-                ) * gamma * (min_qf_next_target).view(-1)
+                next_q_value = data.rewards.flatten() + gamma * (
+                    min_qf_next_target
+                ).view(-1)
 
             qf1_a_values = policy.qf1(data.observations, data.actions).view(-1)
             qf2_a_values = policy.qf2(data.observations, data.actions).view(-1)
@@ -559,5 +559,5 @@ def test_sac():
 
 if __name__ == "__main__":
     # hyperparam_tune()
-    # train_sac()
-    test_sac()
+    train_sac()
+    # test_sac()

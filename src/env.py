@@ -222,7 +222,7 @@ class PIDOuterLoop:
         self.PID_z.update(pos_error[2])
 
 
-class QuadEnv(fym.BaseEnv):
+class QuadEnv(fym.BaseEnv, gym.Env):
     def __init__(self, env_config):
         super().__init__(**env_config["fkw"])
         self.plant = Multicopter(plant_config=env_config["plant_config"])
@@ -334,7 +334,7 @@ class QuadEnv(fym.BaseEnv):
         # -- AFTER UPDATE
         # get reward
         next_obs = self.observation()
-        reward = self.get_reward(obs, action, next_obs)
+        reward = self.get_reward(obs, action)
         # get done
         bounds_out = not self.observation_space.contains(next_obs)
         done = done or bounds_out
@@ -372,18 +372,12 @@ class QuadEnv(fym.BaseEnv):
         dtype = dtype or np.float32
         return dtype(obs)
 
-    def get_reward(self, obs, action, next_obs):
-        bounds_out = not self.observation_space.contains(next_obs)
-        if bounds_out:
-            reward = -5000
-        else:
-            obs = obs[:, None]
-            action = action[:, None]
+    def get_reward(self, obs, action):
+        obs = obs[:, None]
+        action = action[:, None]
 
-            # hovering reward
-            reward = -(
-                +obs.T @ self.LQR_Q @ obs + action.T @ self.LQR_R @ action
-            ).ravel()
+        # hovering reward
+        reward = -(obs.T @ self.LQR_Q @ obs + action.T @ self.LQR_R @ action).ravel()
 
         # scaling
         reward *= self.reward_scale
