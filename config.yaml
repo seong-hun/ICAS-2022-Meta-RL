@@ -4,14 +4,14 @@ env_config:
       - 1
       - 20
       - 20
-      - 1
-      - 1
-      - 1
+      - 0.2
+      - 0.2
+      - 0.2
     R:
-      - 1
-      - 1
-      - 1
-      - 1
+      - 0.05
+      - 0.05
+      - 0.05
+      - 0.05
   fkw:
     dt: 0.02
     max_t: 6
@@ -33,13 +33,35 @@ env_config:
         - -30.0
         - -30.0
     vz:
-      high: 0.0
+      high: 10.0
       low: -10.0
+  outer_loop: fixed
+  perturb_scale:
+    angles: 1
+    omega: 1
+    pos: 1
+    vel: 1
+  plant_config:
+    init:
+      pos:
+        - 0.0
+        - 0.0
+        - -5.0
+    task_config:
+      Jfrange:
+        - 0.8
+        - 1.2
+      fvrange:
+        - 0.0
+        - 0.6
+      max_frotors: 2
+      mfrange:
+        - 0.8
+        - 1.2
+      rfrange:
+        - 0.0
+        - 0.4
   pos_des:
-    - 0.0
-    - 0.0
-    - -5.0
-  pos_init:
     - 0.0
     - 0.0
     - -5.0
@@ -48,20 +70,6 @@ env_config:
     angles: 0.1
     pos: 1
     vel: 0.2
-  tasks:
-    Jfrange:
-      - 0.8
-      - 1.2
-    fvrange:
-      - 0.0
-      - 0.6
-    max_frotors: 2
-    mfrange:
-      - 0.8
-      - 1.2
-    rfrange:
-      - 0.0
-      - 0.4
 tune:
   config:
     alpha: 0.2

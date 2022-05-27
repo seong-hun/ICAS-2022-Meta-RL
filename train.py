@@ -1,22 +1,29 @@
 import os
 import random
+import shutil
 import time
+from pathlib import Path
 
+import fym
 import gym
+import matplotlib.pyplot as plt
 import numpy as np
 import ray
+import ray.tune as tune
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import yaml
-from loguru import logger
-from ray import tune
+from ray.tune import ExperimentAnalysis
+from scipy.spatial.transform import Rotation
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 from torch.utils.tensorboard.writer import SummaryWriter
 
 from src.env import QuadEnv
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 with open("config.yaml", "r") as f:
     CONFIG = yaml.load(f, Loader=yaml.SafeLoader)
@@ -29,10 +36,10 @@ def make_env(config):
         env = gym.wrappers.RecordEpisodeStatistics(env)
         if config["fault_occurs"]:
             # set LoE fault (task)
-            task = env.get_task(rf=config["rf"], random=False)
+            task = env.plant.get_task(rf=config["rf"], random=False)
         else:
-            task = env.get_task(random=False)
-        env.set_task(task)
+            task = env.plant.get_task(random=False)
+        env.plant.set_task(task)
         return env
 
     return wrapper
@@ -65,10 +72,6 @@ class Actor(nn.Module):
         log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (
             log_std + 1
         )
-        return mean, log_std
-
-    def get_action(self, x):
-        mean, log_std = self(x)
         std = log_std.exp()
         normal = torch.distributions.Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
@@ -106,6 +109,49 @@ class SoftQNetwork(nn.Module):
         return x
 
 
+class SAC(nn.Module):
+    def __init__(self, envs, config):
+        super().__init__()
+        self.actor = Actor(envs, config)
+
+        # setup networks
+        self.qf1 = SoftQNetwork(envs)
+        self.qf2 = SoftQNetwork(envs)
+        self.qf1_target = SoftQNetwork(envs)
+        self.qf2_target = SoftQNetwork(envs)
+
+        self.qf1_target.load_state_dict(self.qf1.state_dict())
+        self.qf2_target.load_state_dict(self.qf2.state_dict())
+
+        # setup optimizers
+        self.q_optimizer = optim.Adam(
+            list(self.qf1.parameters()) + list(self.qf2.parameters()),
+            lr=config["q_lr"],
+        )
+        self.actor_optimizer = optim.Adam(
+            list(self.actor.parameters()),
+            lr=config["policy_lr"],
+        )
+
+        # with autotune = True
+        self.target_entropy = -torch.prod(torch.Tensor(envs.action_space.shape)).item()
+        self.log_alpha = torch.zeros(1, requires_grad=True)
+        self.alpha = self.log_alpha.exp().item()
+        self.a_optimizer = optim.Adam([self.log_alpha], lr=config["q_lr"])
+
+    def get_action(self, obs):
+        assert isinstance(obs, np.ndarray)
+        if obs.ndim == 1:
+            action, *_ = self.actor(torch.Tensor(obs).to(device)[None])
+            action = action.detach().cpu().numpy()[0]
+        elif obs.ndim == 2:
+            action, *_ = self.actor(torch.Tensor(obs).to(device))
+            action = action.detach().cpu().numpy()
+        else:
+            raise ValueError
+        return action
+
+
 def sac_trainable(config, checkpoint_dir=None):
     """Ray.tune functional trainable method"""
 
@@ -122,45 +168,21 @@ def sac_trainable(config, checkpoint_dir=None):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     # make vectorized multiple envs for averaging the results
     envs = DummyVecEnv([make_env(config) for _ in range(config["n_envs"])])
 
-    actor = Actor(envs, config)
+    # setup policy
+    policy = SAC(envs, config)
+    policy.to(device)
 
-    # setup networks
-    qf1 = SoftQNetwork(envs).to(device)
-    qf2 = SoftQNetwork(envs).to(device)
-    qf1_target = SoftQNetwork(envs).to(device)
-    qf2_target = SoftQNetwork(envs).to(device)
-    qf1_target.load_state_dict(qf1.state_dict())
-    qf2_target.load_state_dict(qf2.state_dict())
-
-    # setup optimizers
-    q_optimizer = optim.Adam(
-        list(qf1.parameters()) + list(qf2.parameters()), lr=config["q_lr"]
-    )
-    actor_optimizer = optim.Adam(list(actor.parameters()), lr=config["policy_lr"])
-
-    # with autotune = True
-    target_entropy = -torch.prod(
-        torch.Tensor(envs.action_space.shape).to(device)
-    ).item()
-    log_alpha = torch.zeros(1, requires_grad=True, device=device)
-    alpha = log_alpha.exp().item()
-    a_optimizer = optim.Adam([log_alpha], lr=config["q_lr"])
+    start = 0
 
     # load from the past checkpoint
     if checkpoint_dir:
         checkpoint = os.path.join(checkpoint_dir, "checkpoint")
         state = torch.load(checkpoint)
-        actor.load_state_dict(state["actor"])
-        qf1.load_state_dict(state["qf1"])
-        qf2.load_state_dict(state["qf2"])
-        actor_optimizer.load_state_dict(state["actor_optimizer"])
-        q_optimizer.load_state_dict(state["q_optimizer"])
-        a_optimizer.load_state_dict(state["a_optimizer"])
+        start = state["global_step"] + 1
+        policy.load_state_dict(state["policy"])
 
     # gamma from mgamma
     gamma = 1 - config["mgamma"]
@@ -178,15 +200,14 @@ def sac_trainable(config, checkpoint_dir=None):
 
     # TRY NOT TO MODIFY: start the game
     obs = envs.reset()
-    for global_step in range(int(config["total_timesteps"])):
+    for global_step in range(start, int(config["total_timesteps"])):
         # ALGO LOGIC: put action logic here
         if global_step < config["learning_starts"]:
             actions = np.array(
                 [envs.action_space.sample() for _ in range(envs.num_envs)]
             )
         else:
-            actions, _, _ = actor.get_action(torch.Tensor(obs).to(device))
-            actions = actions.detach().cpu().numpy()
+            actions = policy.get_action(obs)
 
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, dones, infos = envs.step(actions)
@@ -205,28 +226,32 @@ def sac_trainable(config, checkpoint_dir=None):
         if global_step > config["learning_starts"]:
             data = rb.sample(int(config["batch_size"]))
             with torch.no_grad():
-                next_state_actions, next_state_log_pi, _ = actor.get_action(
+                next_state_actions, next_state_log_pi, _ = policy.actor(
                     data.next_observations
                 )
-                qf1_next_target = qf1_target(data.next_observations, next_state_actions)
-                qf2_next_target = qf2_target(data.next_observations, next_state_actions)
+                qf1_next_target = policy.qf1_target(
+                    data.next_observations, next_state_actions
+                )
+                qf2_next_target = policy.qf2_target(
+                    data.next_observations, next_state_actions
+                )
                 min_qf_next_target = (
                     torch.min(qf1_next_target, qf2_next_target)
-                    - alpha * next_state_log_pi
+                    - policy.alpha * next_state_log_pi
                 )
                 next_q_value = data.rewards.flatten() + (
                     1 - data.dones.flatten()
                 ) * gamma * (min_qf_next_target).view(-1)
 
-            qf1_a_values = qf1(data.observations, data.actions).view(-1)
-            qf2_a_values = qf2(data.observations, data.actions).view(-1)
+            qf1_a_values = policy.qf1(data.observations, data.actions).view(-1)
+            qf2_a_values = policy.qf2(data.observations, data.actions).view(-1)
             qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
             qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
             qf_loss = qf1_loss + qf2_loss
 
-            q_optimizer.zero_grad()
+            policy.q_optimizer.zero_grad()
             qf_loss.backward()
-            q_optimizer.step()
+            policy.q_optimizer.step()
 
             if (
                 global_step % config["policy_frequency"] == 0
@@ -234,37 +259,39 @@ def sac_trainable(config, checkpoint_dir=None):
                 for _ in range(
                     config["policy_frequency"]
                 ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                    pi, log_pi, _ = actor.get_action(data.observations)
-                    qf1_pi = qf1(data.observations, pi)
-                    qf2_pi = qf2(data.observations, pi)
+                    pi, log_pi, _ = policy.actor(data.observations)
+                    qf1_pi = policy.qf1(data.observations, pi)
+                    qf2_pi = policy.qf2(data.observations, pi)
                     min_qf_pi = torch.min(qf1_pi, qf2_pi).view(-1)
-                    actor_loss = ((alpha * log_pi) - min_qf_pi).mean()
+                    actor_loss = ((policy.alpha * log_pi) - min_qf_pi).mean()
 
-                    actor_optimizer.zero_grad()
+                    policy.actor_optimizer.zero_grad()
                     actor_loss.backward()
-                    actor_optimizer.step()
+                    policy.actor_optimizer.step()
 
                     # with autotune = True
                     with torch.no_grad():
-                        _, log_pi, _ = actor.get_action(data.observations)
-                    alpha_loss = (-log_alpha * (log_pi + target_entropy)).mean()
+                        _, log_pi, _ = policy.actor(data.observations)
+                    alpha_loss = (
+                        -policy.log_alpha * (log_pi + policy.target_entropy)
+                    ).mean()
 
-                    a_optimizer.zero_grad()
+                    policy.a_optimizer.zero_grad()
                     alpha_loss.backward()
-                    a_optimizer.step()
-                    alpha = log_alpha.exp().item()
+                    policy.a_optimizer.step()
+                    policy.alpha = policy.log_alpha.exp().item()
 
             # update the target networks
             if global_step % config["target_network_frequency"] == 0:
                 for param, target_param in zip(
-                    qf1.parameters(), qf1_target.parameters()
+                    policy.qf1.parameters(), policy.qf1_target.parameters()
                 ):
                     target_param.data.copy_(
                         config["tau"] * param.data
                         + (1 - config["tau"]) * target_param.data
                     )
                 for param, target_param in zip(
-                    qf2.parameters(), qf2_target.parameters()
+                    policy.qf2.parameters(), policy.qf2_target.parameters()
                 ):
                     target_param.data.copy_(
                         config["tau"] * param.data
@@ -283,7 +310,7 @@ def sac_trainable(config, checkpoint_dir=None):
                 writer.add_scalar("losses/qf2_loss", qf2_loss.item(), global_step)
                 writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
                 writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
-                writer.add_scalar("losses/alpha", alpha, global_step)
+                writer.add_scalar("losses/alpha", policy.alpha, global_step)
                 print("SPS:", int(global_step / (time.time() - start_time)))
                 writer.add_scalar(
                     "charts/SPS",
@@ -309,15 +336,7 @@ def sac_trainable(config, checkpoint_dir=None):
                 with tune.checkpoint_dir(step=global_step) as checkpoint_dir:
                     path = os.path.join(checkpoint_dir, "checkpoint")
                     torch.save(
-                        {
-                            "actor": actor.state_dict(),
-                            "qf1": qf1.state_dict(),
-                            "qf2": qf2.state_dict(),
-                            "actor_optimizer": actor_optimizer.state_dict(),
-                            "q_optimizer": q_optimizer.state_dict(),
-                            "a_optimizer": a_optimizer.state_dict(),
-                            "global_step": global_step,
-                        },
+                        {"policy": policy.state_dict(), "global_step": global_step},
                         path,
                     )
 
@@ -326,24 +345,38 @@ def sac_trainable(config, checkpoint_dir=None):
 
 
 def hyperparam_tune():
+    expdir = Path("exp/origin-hover/SAC/tune")
+    if expdir.exists():
+        shutil.rmtree(expdir)
+    expdir.mkdir(exist_ok=True, parents=True)
+
     # setup tune search space
     config = {
         "seed": tune.randint(0, 100000),
         "mgamma": tune.loguniform(1e-1, 1e-3),  # gamma = 1 - mgamma
         "q_lr": tune.loguniform(1e-4, 1e-2),
         "policy_lr": tune.loguniform(1e-4, 1e-2),
-        "fault_occurs": tune.grid_search([True, False]),
         "env_config": CONFIG["env_config"],
         **CONFIG["tune"]["config"],
     }
     tune_config = {
         "config": config,
         "num_samples": 32,
-        "local_dir": "./exp/origin-hover/SAC",
-        "name": "hyperparam-tune",
+        "local_dir": str(expdir),
     }
 
-    # tune
+    # -- CASE: NORMAL
+    config["fault_occurs"] = False
+    tune_config["name"] = "normal"
+
+    ray.init()
+    tune.run(sac_trainable, **tune_config)
+    ray.shutdown()
+
+    # -- CASE: FAULT
+    config["fault_occurs"] = True
+    tune_config["name"] = "fault"
+
     ray.init()
     tune.run(sac_trainable, **tune_config)
     ray.shutdown()
@@ -351,19 +384,26 @@ def hyperparam_tune():
 
 def train_sac():
     # best hyperparamters finding from ``hyperparam_tune()``
+
+    expdir = Path("exp/origin-hover/SAC/train")
+    if expdir.exists():
+        shutil.rmtree(expdir)
+    expdir.mkdir(exist_ok=True, parents=True)
+
+    # -- CASE: NORMAL
     config = {
         "seed": tune.randint(0, 100000),
         "fault_occurs": False,
-        "mgamma": 0.00518,
-        "policy_lr": 0.000613,
-        "q_lr": 0.00471,
+        "mgamma": 0.0156,
+        "policy_lr": 0.000222,
+        "q_lr": 0.00146,
         "env_config": CONFIG["env_config"],
         **CONFIG["tune"]["config"],
     }
     tune_config = {
-        "config": config,
+        "config": config | {"total_timesteps": 100000},
         "num_samples": 10,
-        "local_dir": "./exp/origin-hover/SAC/train",
+        "local_dir": str(expdir),
         "name": "normal",
     }
 
@@ -371,19 +411,20 @@ def train_sac():
     tune.run(sac_trainable, **tune_config)
     ray.shutdown()
 
+    # -- CASE: FAULT
     config = {
         "seed": tune.randint(0, 100000),
         "fault_occurs": True,
-        "mgamma": 0.032,
-        "policy_lr": 0.00392,
-        "q_lr": 0.00957,
+        "mgamma": 0.0914,
+        "policy_lr": 0.00504,
+        "q_lr": 0.00131,
         "env_config": CONFIG["env_config"],
         **CONFIG["tune"]["config"],
     }
     tune_config = {
-        "config": config,
+        "config": config | {"total_timesteps": 100000},
         "num_samples": 10,
-        "local_dir": "./exp/origin-hover/SAC/train",
+        "local_dir": str(expdir),
         "name": "fault",
     }
 
@@ -392,6 +433,125 @@ def train_sac():
     ray.shutdown()
 
 
+# -- TEST
+
+
+def get_trial(fault_occurs=False, nid=None):
+    # get last checkpoint of experiments
+    exppath = Path("exp/origin-hover/SAC/train")
+    if fault_occurs:
+        exppath /= "fault"
+    else:
+        exppath /= "normal"
+    analysis = ExperimentAnalysis(str(exppath))
+    assert analysis.trials is not None
+
+    # get trials and a trial
+    trials = sorted(analysis.trials, key=lambda t: t.trial_id)
+    trial = trials[nid or 0]
+    return trial
+
+
+def test_sac():
+    # get a checkpoint
+    trial = get_trial(fault_occurs=False)
+    config = trial.config
+    assert trial.logdir is not None
+    testpath = Path(trial.logdir) / "test-flight.h5"
+
+    # get the env used for training
+    # remedy for new config
+    config["env_config"]["plant_config"] = CONFIG["env_config"]["plant_config"]
+    config["env_config"]["fkw"]["max_t"] = 20
+    config["env_config"]["outer_loop"] = "PID"
+    config["env_config"]["perturb_scale"] = CONFIG["env_config"]["perturb_scale"]
+    env = make_env(config)()
+    # add a fym logger to the env
+    env.env.logger = fym.Logger(path=testpath)
+
+    # make a policy
+    policy = SAC(env, config)
+    policy.to(device)
+
+    # load policy from the checkpoint
+    checkpoint = os.path.join(trial.checkpoint.value, "checkpoint")
+    state = torch.load(checkpoint)
+    policy.load_state_dict(state["policy"])
+
+    # start testing
+    episode_reward = 0
+    done = False
+    obs = env.reset(mode="neighbor")
+
+    while not done:
+        env.render()
+        action = policy.get_action(obs)
+        obs, reward, done, _ = env.step(action)
+        episode_reward += reward
+
+    env.close()
+
+    # -- Plot
+    data = fym.load(testpath)
+    if type(data) is not dict:
+        raise ValueError("data should be dict")
+
+    fig, axes = plt.subplots(4, 2, figsize=(12, 8), squeeze=False, sharex=True)
+
+    data["plant"]
+
+    ax = axes[0, 0]
+    ax.plot(data["t"], data["plant"]["pos"].squeeze(-1))
+    ax.set_ylabel("Position, m")
+    ax.legend([r"$x$", r"$y$", r"$z$"])
+
+    ax = axes[1, 0]
+    ax.plot(data["t"], data["plant"]["vel"].squeeze(-1))
+    ax.set_ylabel("Velocity, m/s")
+    ax.legend([r"$v_x$", r"$v_y$", r"$v_z$"])
+
+    ax = axes[2, 0]
+    angles = Rotation.from_matrix(data["plant"]["R"]).as_euler("ZYX")[:, ::-1]
+    ax.plot(data["t"], np.rad2deg(angles))
+    ax.set_ylabel("Angles, deg")
+    ax.legend([r"$\phi$", r"$\theta$", r"$\psi$"])
+
+    ax = axes[3, 0]
+    ax.plot(data["t"], data["plant"]["omega"].squeeze(-1))
+    ax.set_ylabel("Omega, rad/sec")
+    ax.legend([r"$p$", r"$q$", r"$r$"])
+
+    ax.set_xlabel("Time, sec")
+
+    ax = axes[0, 1]
+    ax.plot(data["t"], data["rotorfs_cmd"].squeeze(-1)[:, 0], "r--")
+    ax.plot(data["t"], data["plant_info"]["rotorfs"].squeeze(-1)[:, 0], "k-")
+    ax.set_ylabel("Rotor 1 thrust, N")
+
+    ax = axes[1, 1]
+    ax.plot(data["t"], data["rotorfs_cmd"].squeeze(-1)[:, 1], "r--")
+    ax.plot(data["t"], data["plant_info"]["rotorfs"].squeeze(-1)[:, 1], "k-")
+    ax.set_ylabel("Rotor 2 thrust, N")
+
+    ax = axes[2, 1]
+    ax.plot(data["t"], data["rotorfs_cmd"].squeeze(-1)[:, 2], "r--")
+    ax.plot(data["t"], data["plant_info"]["rotorfs"].squeeze(-1)[:, 2], "k-")
+    ax.set_ylabel("Rotor 3 thrust, N")
+
+    ax = axes[3, 1]
+    ax.plot(data["t"], data["rotorfs_cmd"].squeeze(-1)[:, 3], "r--")
+    ax.plot(data["t"], data["plant_info"]["rotorfs"].squeeze(-1)[:, 3], "k-")
+    ax.set_ylabel("Rotor 4 thrust, N")
+
+    ax.set_xlabel("Time, sec")
+
+    fig.tight_layout()
+    # fig.savefig(testdir / "hist.pdf", bbox_inches="tight")
+
+    plt.show()
+
+
 if __name__ == "__main__":
     # hyperparam_tune()
-    train_sac()
+    # train_sac()
+    test_sac()

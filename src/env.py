@@ -1,5 +1,3 @@
-from typing import Union
-
 import fym
 import gym
 import numpy as np
@@ -56,12 +54,14 @@ class Multicopter(fym.BaseEnv):
     )
     Lambda = np.eye(4)
 
-    def __init__(self):
+    def __init__(self, plant_config):
         super().__init__()
-        self.pos = fym.BaseSystem(np.vstack((0, 0, -10)))
+        self.pos = fym.BaseSystem(np.array(plant_config["init"]["pos"])[:, None])
         self.vel = fym.BaseSystem(np.zeros((3, 1)))
         self.R = fym.BaseSystem(np.eye(3))
         self.omega = fym.BaseSystem(np.zeros((3, 1)))
+
+        self.task_config = plant_config["task_config"]
 
     def deriv(self, pos, vel, R, omega, rotorfs):
         u = self.B @ rotorfs
@@ -91,17 +91,149 @@ class Multicopter(fym.BaseEnv):
         rotorfs = np.clip(rotorfs_cmd, self.rotorf_min, self.rotorf_max)
         return self.Lambda @ rotorfs
 
+    def get_task(self, random=True, **kwargs):
+        # default task
+        task = {
+            "rf": np.ones(4),  # rotor faults (0: complete failure, 1: healthy)
+            "fi": (),  # fault index
+            "mf": 1,  # loss of mass
+            "Jf": np.ones(3),  # loss of J
+            "fv": 0.5,  # free variable
+        }
 
-class QuadEnv(fym.BaseEnv, gym.Env):
-    """Environment for inner-loop RL training."""
+        # update with random task
+        if random:
+            rand_rf = np.ones(4)
+            rand_fi = tuple(
+                sorted(
+                    np.random.choice(
+                        range(4),
+                        np.random.randint(1, self.task_config["max_frotors"] + 1),
+                        replace=False,
+                    )
+                )
+            )
+            for i in rand_fi:
+                rand_rf[i] = np.random.uniform(*self.task_config["rfrange"])
 
+            task |= {
+                "rf": rand_rf,
+                "fi": rand_fi,
+                "mf": np.random.uniform(*self.task_config["mfrange"]),
+                "Jf": np.random.uniform(*self.task_config["Jfrange"], size=3),
+                "fv": np.random.uniform(*self.task_config["fvrange"]),
+            }
+
+        # update with given task
+        task |= kwargs
+
+        # update fault index to match rotor faults (rf)
+        task["fi"] = tuple(
+            i for i, v in enumerate(task["rf"]) if v <= self.task_config["rfrange"][1]
+        )
+
+        return task
+
+    def set_task(self, task):
+        self.Lambda = np.diag(task["rf"])
+        self.m *= task["mf"]
+        self.J = np.diag(task["Jf"]) @ self.J
+        self.task = task
+
+
+class PID:
+    def __init__(self, kP, kI, kD, dt):
+        self.kP = kP
+        self.kI = kI
+        self.kD = kD
+        self.dt = dt
+
+        self._prev_e = None
+        self._prev_e_int = 0
+
+    def get(self, e):
+        # At first, prev_e = e
+        prev_e = self._prev_e or e
+
+        e_deriv = (e - prev_e) / self.dt
+        e_int = self._prev_e_int
+
+        u = self.kP * e + self.kI * e_int + self.kD * e_deriv
+        return u
+
+    def update(self, e):
+        prev_e = self._prev_e or e
+        e_int = self._prev_e_int
+
+        if self.kI:
+            self._prev_e_int = e_int + (prev_e + e) / 2 * self.dt  # trapz
+        if self.kD:
+            self._prev_e = e
+
+
+class FixedOuterLoop:
+    def __init__(self):
+        self.F_des_i = np.vstack((0, 0, -1))
+
+    def get(self, pos):
+        return self.F_des_i
+
+    def update(self, pos):
+        pass
+
+
+class PIDOuterLoop:
+    def __init__(self, env):
+        self.clock = env.clock
+
+        # PID outer-loop controller
+        dt = self.clock.dt
+        self.PID_x = PID(kP=0.25, kI=0.006, kD=0.4, dt=dt)
+        self.PID_y = PID(kP=0.25, kI=0.006, kD=0.4, dt=dt)
+        self.PID_z = PID(kP=1, kI=0.1, kD=1, dt=dt)
+
+        # set reference
+        self.get_pos_ref = lambda t: np.vstack((0, 0, -5))
+
+        # Constants
+        self.m = env.plant.m
+        self.g = env.plant.g
+        self.e3 = env.plant.e3
+
+    def get(self, pos):
+        t = self.clock.get()
+        pos = pos.ravel()
+        pos_ref = self.get_pos_ref(t).ravel()
+
+        ax_des = self.PID_x.get(pos_ref[0] - pos[0])
+        ay_des = self.PID_y.get(pos_ref[1] - pos[1])
+        az_des = self.PID_z.get(pos_ref[2] - pos[2])
+        a_des = np.vstack((ax_des, ay_des, az_des))
+
+        F_des_i = self.m * (a_des - self.g * self.e3)
+        return F_des_i
+
+    def update(self, pos):
+        t = self.clock.get()
+        pos_ref = self.get_pos_ref(t)
+        pos_error = (pos - pos_ref).ravel()
+        self.PID_x.update(pos_error[0])
+        self.PID_x.update(pos_error[1])
+        self.PID_x.update(pos_error[2])
+
+
+class QuadEnv(fym.BaseEnv):
     def __init__(self, env_config):
         super().__init__(**env_config["fkw"])
-        self.plant = Multicopter()
+        self.plant = Multicopter(plant_config=env_config["plant_config"])
 
-        # setup initial position
-        self.plant.pos.initial_state = np.array(env_config["pos_init"])[:, None]
+        # set the outer loop
+        if env_config["outer_loop"] == "PID":
+            self.outer = PIDOuterLoop(self)
+        elif env_config["outer_loop"] == "fixed":
+            self.outer = FixedOuterLoop()
 
+        # -- FOR RL
         # observation: vz (1), eta (2), omega (3) -- TOTAL: 6
         self.observation_space = spaces.Box(
             low=np.float32(
@@ -132,26 +264,78 @@ class QuadEnv(fym.BaseEnv, gym.Env):
             dtype=np.float32,
         )
 
-        # reward (LQR)
+        # reward (- LQR cost)
         self.LQR_Q = np.diag(env_config["LQR"]["Q"])
         self.LQR_R = np.diag(env_config["LQR"]["R"])
+        # scaling reward for discretization
         self.reward_scale = self.clock.dt
 
-        # for task setup
-        self._tasks = env_config["tasks"]
+        # -- TEST ENV
+        self.pscale = env_config["perturb_scale"]
 
-        self.rng = np.random.default_rng()
+    def reset(self, mode="random"):
+        """Reset the plant states.
+
+        Parameters
+        ----------
+        mode : {"random", "neighbor", "initial"}
+        """
+        super().reset()
+
+        if mode == "neighbor":
+            angles = Rotation.from_matrix(self.plant.R.state).as_euler("ZYX")
+            angles = np.deg2rad(
+                np.random.normal(loc=angles, scale=self.pscale["angles"])
+            )
+            self.plant.pos.state = np.random.normal(
+                loc=self.plant.pos.state,
+                scale=self.pscale["pos"],
+            )
+            self.plant.vel.state = np.random.normal(
+                loc=self.plant.vel.state,
+                scale=self.pscale["vel"],
+            )
+            self.plant.R.state = Rotation.from_euler("ZYX", angles).as_matrix()
+            self.plant.omega.state = np.random.normal(
+                loc=self.plant.omega.state, scale=self.pscale["omega"]
+            )
+        elif mode == "random":
+            obs = np.float64(self.observation_space.sample())
+            pos, vel, R, omega = self.obs2state(obs)
+            self.plant.pos.state = pos
+            self.plant.vel.state = vel
+            self.plant.R.state = R
+            self.plant.omega.state = omega
+        elif mode == "initial":
+            pass
+        else:
+            raise ValueError
+
+        obs = self.observation()
+        assert self.observation_space.contains(obs), breakpoint()
+
+        return obs
 
     def step(self, action):
-        # get reward using current observation and action
-        reward = self.get_reward(action)
+        # -- BEFORE UPDATE
+        obs = self.observation()
+        pos = self.plant.pos.state
+
+        # -- UPDATE
+        # ``info`` contains ``t`` and ``state_dict``
         _, done = self.update(action=action)
+        self.outer.update(pos=pos)
+
+        # -- AFTER UPDATE
+        # get reward
         next_obs = self.observation()
+        reward = self.get_reward(obs, action, next_obs)
+        # get done
         bounds_out = not self.observation_space.contains(next_obs)
-        if bounds_out:
-            reward += -1
         done = done or bounds_out
-        return next_obs, reward, done, {}
+        # get info
+        info = {}
+        return next_obs, reward, done, info
 
     def set_dot(self, t, action):
         # make a 2d vector from an 1d array
@@ -165,106 +349,40 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         }
 
     def observation(self, dtype=None):
-        _, vel, R, omega = self.plant.observe_list()
+        # get states
+        pos, vel, R, omega = self.plant.observe_list()
 
+        # make obs
         vz = vel.ravel()[2]
-
-        # fixed acc command directing -e3 for inner-loop RL
-        n_i = -self.plant.e3
+        # get n_i
+        F_des_i = self.outer.get(pos)
+        F_des_norm = np.linalg.norm(F_des_i)
+        n_i = F_des_i / max(F_des_norm, 1e-13)
         n_b = R.T @ n_i
         eta = n_b.ravel()[:2]
+        omega = omega.ravel()
+        obs = np.hstack((vz, eta, omega))
 
-        obs = np.hstack((vz, eta, omega.ravel()))
-
+        # set dtype for RL policies
         dtype = dtype or np.float32
         return dtype(obs)
 
-    def get_reward(self, action):
-        obs = self.observation(dtype=np.float64)[:, None]
-        action = action[:, None]
+    def get_reward(self, obs, action, next_obs):
+        bounds_out = not self.observation_space.contains(next_obs)
+        if bounds_out:
+            reward = -5000
+        else:
+            obs = obs[:, None]
+            action = action[:, None]
 
-        # hovering reward
-        reward = -(+obs.T @ self.LQR_Q @ obs + action.T @ self.LQR_R @ action).ravel()
+            # hovering reward
+            reward = -(
+                +obs.T @ self.LQR_Q @ obs + action.T @ self.LQR_R @ action
+            ).ravel()
 
         # scaling
         reward *= self.reward_scale
         return np.float32(reward)
-
-    def reset(self, with_obs=None):
-        super().reset()
-
-        if with_obs is not None:
-            obs = with_obs
-        else:
-            # randomly perturbate the state
-            # obs = np.float64(self.observation_space.sample())
-            obs = self.observation(dtype=np.float64)
-
-        # set states from obs
-        pos, vel, R, omega = self.obs2state(obs)
-
-        self.plant.pos.state = pos
-        self.plant.vel.state = vel
-        self.plant.R.state = R
-        self.plant.omega.state = omega
-
-        obs = self.observation()
-
-        # check the state space contains the random state
-        assert self.observation_space.contains(obs), breakpoint()
-
-        return obs
-
-    def get_task(self, random=True, **kwargs):
-        # default task
-        task = {
-            "rf": np.ones(4),  # rotor faults (0: complete failure, 1: healthy)
-            "fi": (),  # fault index
-            "mf": 1,  # loss of mass
-            "Jf": np.ones(3),  # loss of J
-            "fv": 0.5,  # free variable
-        }
-
-        # update with random task
-        if random:
-            rng = self.rng
-
-            rand_rf = np.ones(4)
-            rand_fi = tuple(
-                sorted(
-                    rng.choice(
-                        range(4),
-                        rng.integers(1, self._tasks["max_frotors"] + 1),
-                        replace=False,
-                    )
-                )
-            )
-            for i in rand_fi:
-                rand_rf[i] = rng.uniform(*self._tasks["rfrange"])
-
-            task |= {
-                "rf": rand_rf,
-                "fi": rand_fi,
-                "mf": rng.uniform(*self._tasks["mfrange"]),
-                "Jf": rng.uniform(*self._tasks["Jfrange"], size=3),
-                "fv": rng.uniform(*self._tasks["fvrange"]),
-            }
-
-        # update with given task
-        task |= kwargs
-
-        # update fault index to match rotor faults (rf)
-        task["fi"] = tuple(
-            i for i, v in enumerate(task["rf"]) if v <= self._tasks["rfrange"][1]
-        )
-
-        return task
-
-    def set_task(self, task):
-        self.plant.Lambda = np.diag(task["rf"])
-        self.plant.m *= task["mf"]
-        self.plant.J = np.diag(task["Jf"]) @ self.plant.J
-        self.task = task
 
     def eta2R(self, eta):
         n3 = np.vstack((eta, -np.sqrt(1 - (eta**2).sum())))
@@ -278,8 +396,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         RT[:, 1:2] = e3xn3
         RT[:, 2:3] = -n3
 
-        R = RT.T
-        return R
+        return RT.T
 
     def obs2state(self, obs):
         """Convert observation to pos, vel, R, omega."""
@@ -287,8 +404,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         eta = obs[1:3][:, None]
         omega = obs[3:][:, None]
 
-        pos = np.zeros((3, 1))
+        pos = self.plant.pos.initial_state
         vel = np.vstack((0, 0, vz))
         R = self.eta2R(eta)
-
         return pos, vel, R, omega
