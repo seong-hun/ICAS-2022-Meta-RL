@@ -267,15 +267,17 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         )
 
         # reward (- LQR cost)
-        self.LQR_Q = np.diag(env_config["LQR"]["Q"])
-        self.LQR_R = np.diag(env_config["LQR"]["R"])
+        self.LQR_Q = np.diag(env_config["reward"]["Q"])
+        self.LQR_R = np.diag(env_config["reward"]["R"])
         # scaling reward for discretization
         self.reward_scale = self.clock.dt
+        self.boundsout_reward = env_config["reward"]["boundsout"]
 
         # -- TEST ENV
-        self.pscale = env_config["perturb_scale"]
+        self.reset_mode = env_config["reset"]["mode"]
+        self.pscale = env_config["reset"]["perturb_scale"]
 
-    def reset(self, mode="random"):
+    def reset(self):
         """Reset the plant states.
 
         Parameters
@@ -284,7 +286,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         """
         super().reset()
 
-        if mode == "neighbor":
+        if self.reset_mode == "neighbor":
             angles = Rotation.from_matrix(self.plant.R.state).as_euler("ZYX")
             angles = np.deg2rad(
                 np.random.normal(loc=angles, scale=self.pscale["angles"])
@@ -301,14 +303,14 @@ class QuadEnv(fym.BaseEnv, gym.Env):
             self.plant.omega.state = np.random.normal(
                 loc=self.plant.omega.state, scale=self.pscale["omega"]
             )
-        elif mode == "random":
+        elif self.reset_mode == "random":
             obs = np.float64(self.observation_space.sample())
             pos, vel, R, omega = self.obs2state(obs)
             self.plant.pos.state = pos
             self.plant.vel.state = vel
             self.plant.R.state = R
             self.plant.omega.state = omega
-        elif mode == "initial":
+        elif self.reset_mode == "initial":
             pass
         else:
             raise ValueError
@@ -380,6 +382,12 @@ class QuadEnv(fym.BaseEnv, gym.Env):
 
         # hovering reward
         reward = -(obs.T @ self.LQR_Q @ obs + action.T @ self.LQR_R @ action).ravel()
+
+        # if self.boundsout_reward is None, then reward = - LQR cost
+        # elif self.boundsout_reward set to some value,
+        # then reward = self.boundsout_reward - LQR cost
+        if self.boundsout_reward is not None:
+            reward += self.boundsout_reward
 
         # scaling
         reward *= self.reward_scale

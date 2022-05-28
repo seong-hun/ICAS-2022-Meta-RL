@@ -3,6 +3,7 @@ import random
 import shutil
 import time
 from pathlib import Path
+from pprint import pprint
 
 import fym
 import gym
@@ -24,9 +25,6 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from src.env import QuadEnv
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-with open("config.yaml", "r") as f:
-    CONFIG = yaml.load(f, Loader=yaml.SafeLoader)
 
 
 def make_env(config):
@@ -246,9 +244,14 @@ def sac_trainable(config, checkpoint_dir=None):
                     torch.min(qf1_next_target, qf2_next_target)
                     - policy.alpha * next_state_log_pi
                 )
-                next_q_value = data.rewards.flatten() + gamma * (
-                    min_qf_next_target
-                ).view(-1)
+                if config["env_config"]["reward"]["boundsout"] is None:
+                    next_q_value = data.rewards.flatten() + gamma * (
+                        min_qf_next_target
+                    ).view(-1)
+                else:
+                    next_q_value = data.rewards.flatten() + gamma * (
+                        1 - data.dones.flatten()
+                    ) * (min_qf_next_target).view(-1)
 
             qf1_a_values = policy.qf1(data.observations, data.actions).view(-1)
             qf2_a_values = policy.qf2(data.observations, data.actions).view(-1)
@@ -351,19 +354,36 @@ def sac_trainable(config, checkpoint_dir=None):
     writer.close()
 
 
-def get_trial(fault_occurs=False, nid=None):
+def setup(user_config):
+    """Get the user-defined config"""
+
+    def update(base, new):
+        assert isinstance(base, dict)
+        assert isinstance(new, dict)
+        for k, v in new.items():
+            assert k in base
+            if isinstance(v, dict):
+                update(base[k], v)
+            else:
+                base[k] = v
+
+    with open("config.yaml", "r") as f:
+        CONFIG = yaml.load(f, Loader=yaml.SafeLoader)
+
+    config = CONFIG["config"]
+    update(config, user_config)
+    return config
+
+
+def get_trial(local_dir, trial_id=None):
     # get last checkpoint of experiments
-    exppath = Path("exp/origin-hover/SAC/train")
-    if fault_occurs:
-        exppath /= "fault"
-    else:
-        exppath /= "normal"
-    analysis = ExperimentAnalysis(str(exppath))
+    exp = sorted([str(exp) for exp in Path(local_dir).iterdir() if exp.is_dir()])[-1]
+    analysis = ExperimentAnalysis(exp)
     assert analysis.trials is not None
 
     # get trials and a trial
     trials = sorted(analysis.trials, key=lambda t: t.trial_id)
-    trial = trials[nid or 0]
+    trial = trials[trial_id or 0]
     return trial
 
 
@@ -371,97 +391,68 @@ def get_trial(fault_occurs=False, nid=None):
 
 
 def hyperparam_tune():
-    expdir = Path("exp/origin-hover/SAC/tune")
-    if expdir.exists():
-        shutil.rmtree(expdir)
-    expdir.mkdir(exist_ok=True, parents=True)
-
     # setup tune search space
+
+    # -- CASE: NORMAL
+
     config = {
         "seed": tune.randint(0, 100000),
         "mgamma": tune.loguniform(1e-1, 1e-3),  # gamma = 1 - mgamma
         "q_lr": tune.loguniform(1e-4, 1e-2),
         "policy_lr": tune.loguniform(1e-4, 1e-2),
-        "env_config": CONFIG["env_config"],
-        **CONFIG["tune"]["config"],
-    }
-    tune_config = {
-        "config": config,
-        "num_samples": 32,
-        "local_dir": str(expdir),
-    }
-
-    # make the default config
-    tune_config = CONFIG["tune_config"]
-    tune_config["config"] = CONFIG["config"]
-    config["env_config"] = CONFIG["env_config"]
-
-    # -- CASE: NORMAL
-    config["fault_occurs"] = False
-    tune_config["name"] = "normal"
-
-    ray.init()
-    tune.run(sac_trainable, **tune_config)
-    ray.shutdown()
-
-    # -- CASE: FAULT
-    config["fault_occurs"] = True
-    tune_config["name"] = "fault"
-
-    ray.init()
-    tune.run(sac_trainable, **tune_config)
-    ray.shutdown()
-
-
-def train_sac():
-    # best hyperparamters finding from ``hyperparam_tune()``
-
-    expdir = Path("exp/origin-hover/SAC/train")
-    if expdir.exists():
-        shutil.rmtree(expdir)
-    expdir.mkdir(exist_ok=True, parents=True)
-
-    # -- CASE: NORMAL
-    config = {
-        "seed": tune.randint(0, 100000),
         "fault_occurs": False,
-        "mgamma": 0.0156,
-        "policy_lr": 0.000222,
-        "q_lr": 0.00146,
-        "env_config": CONFIG["env_config"],
-        **CONFIG["tune"]["config"],
+        "env_config": {"outer_loop": "fixed"},
     }
+
     tune_config = {
-        "config": config | {"total_timesteps": 100000},
-        "num_samples": 10,
-        "local_dir": str(expdir),
-        "name": "normal",
+        "local_dir": "exp/origin-hover/SAC/tune/normal",
+        "num_samples": 32,
     }
 
     ray.init()
-    tune.run(sac_trainable, **tune_config)
+    config = setup(config)
+    tune.run(sac_trainable, config=config, **tune_config)
     ray.shutdown()
 
     # -- CASE: FAULT
+
     config = {
         "seed": tune.randint(0, 100000),
+        "mgamma": tune.loguniform(1e-1, 1e-3),  # gamma = 1 - mgamma
+        "q_lr": tune.loguniform(1e-4, 1e-2),
+        "policy_lr": tune.loguniform(1e-4, 1e-2),
         "fault_occurs": True,
-        "mgamma": 0.0914,
-        "policy_lr": 0.00504,
-        "q_lr": 0.00131,
-        "env_config": CONFIG["env_config"],
-        **CONFIG["tune"]["config"],
+        "env_config": {"outer_loop": "fixed"},
     }
+
     tune_config = {
-        "config": config | {"total_timesteps": 100000},
-        "num_samples": 10,
-        "local_dir": str(expdir),
-        "name": "fault",
+        "local_dir": "exp/origin-hover/SAC/tune/fault",
+        "num_samples": 32,
     }
 
     ray.init()
+    config = setup(config)
     tune.run(sac_trainable, **tune_config)
     ray.shutdown()
+
+
+def train_sac(user_tune_configs):
+    for user_tune_config in user_tune_configs:
+        tune_config = {
+            "local_dir": user_tune_config["local_dir"],
+            "num_samples": 5,
+            "config": setup(
+                user_tune_config["config"]
+                | {
+                    "seed": tune.randint(0, 100000),
+                    "total_timesteps": 500000,
+                }
+            ),
+        }
+
+        ray.init()
+        tune.run(sac_trainable, **tune_config)
+        ray.shutdown()
 
 
 # -- TEST
@@ -469,17 +460,29 @@ def train_sac():
 
 def test_sac():
     # get a checkpoint
-    trial = get_trial(fault_occurs=True)
+    trial = get_trial(
+        local_dir="exp/origin-hover/outer-fixed-no-terminal/SAC/normal",
+        trial_id=2,
+    )
     config = trial.config
     assert trial.logdir is not None
     testpath = Path(trial.logdir) / "test-flight.h5"
 
     # get the env used for training
     # remedy for new config
-    config["env_config"]["plant_config"] = CONFIG["env_config"]["plant_config"]
-    config["env_config"]["fkw"]["max_t"] = 20
-    config["env_config"]["outer_loop"] = "PID"
-    config["env_config"]["perturb_scale"] = CONFIG["env_config"]["perturb_scale"]
+    config = setup(
+        {
+            "seed": 0,
+            "fault_occurs": False,
+            "env_config": {
+                "fkw": {
+                    "max_t": 20,
+                },
+                "reset": {"mode": "neighbor"},
+                "outer_loop": "PID",
+            },
+        }
+    )
     env = make_env(config)()
     # add a fym logger to the env
     env.env.logger = fym.Logger(path=testpath)
@@ -487,19 +490,27 @@ def test_sac():
     # make a policy
     policy = SAC(env, config)
     policy.to(device)
-    # load policy from the checkpoint
-    checkpoint = os.path.join(trial.checkpoint.value, "checkpoint")
+    # get last checkpoint
+    checkpoint = sorted(
+        [
+            ckpt / "checkpoint"
+            for ckpt in Path(trial.logdir).rglob("checkpoint*")
+            if ckpt.is_dir()
+        ]
+    )[-1]
+    # checkpoint = os.path.join(trial.checkpoint.value, "checkpoint")
     state = torch.load(checkpoint)
+    # load policy from the checkpoint
     policy.load_state_dict(state["policy"])
     policy.eval()
 
     # start testing
     episode_reward = 0
     done = False
-    obs = env.reset(mode="initial")
+    obs = env.reset()
 
     while not done:
-        env.render()
+        env.render(mode="tqdm")
         action = policy.get_action(obs, deterministic=True)
         obs, reward, done, _ = env.step(action)
         episode_reward += reward
@@ -568,5 +579,48 @@ def test_sac():
 
 if __name__ == "__main__":
     # hyperparam_tune()
-    # train_sac()
-    test_sac()
+    train_sac(
+        [
+            {
+                "local_dir": "exp/origin-hover/outer-fixed-no-terminal/SAC/normal",
+                "config": {
+                    "mgamma": 0.0156,
+                    "policy_lr": 0.000222,
+                    "q_lr": 0.00146,
+                    "fault_occurs": False,
+                    "env_config": {"outer_loop": "fixed"},
+                },
+            },
+            {
+                "local_dir": "exp/origin-hover/outer-fixed-no-terminal/SAC/fault",
+                "config": {
+                    "mgamma": 0.0914,
+                    "policy_lr": 0.00504,
+                    "q_lr": 0.00131,
+                    "fault_occurs": True,
+                    "env_config": {"outer_loop": "fixed"},
+                },
+            },
+            {
+                "local_dir": "exp/origin-hover/outer-PID-no-terminal/SAC/normal",
+                "config": {
+                    "mgamma": 0.0156,
+                    "policy_lr": 0.000222,
+                    "q_lr": 0.00146,
+                    "fault_occurs": False,
+                    "env_config": {"outer_loop": "PID"},
+                },
+            },
+            {
+                "local_dir": "exp/origin-hover/outer-PID-no-terminal/SAC/fault",
+                "config": {
+                    "mgamma": 0.0914,
+                    "policy_lr": 0.00504,
+                    "q_lr": 0.00131,
+                    "fault_occurs": True,
+                    "env_config": {"outer_loop": "PID"},
+                },
+            },
+        ]
+    )
+    # test_sac()

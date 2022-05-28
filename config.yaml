@@ -1,90 +1,95 @@
-env_config:
-  LQR:
-    Q:
-      - 1
-      - 20
-      - 20
-      - 0.2
-      - 0.2
-      - 0.2
-    R:
-      - 0.05
-      - 0.05
-      - 0.05
-      - 0.05
-  fkw:
-    dt: 0.02
-    max_t: 6
-  observation_space:
-    eta:
-      high:
-        - 0.3
-        - 0.3
-      low:
-        - -0.3
-        - -0.3
-    omega:
-      high:
-        - 30.0
-        - 30.0
-        - 30.0
-      low:
-        - -30.0
-        - -30.0
-        - -30.0
-    vz:
-      high: 10.0
-      low: -10.0
-  outer_loop: fixed
-  perturb_scale:
-    angles: 1
-    omega: 1
-    pos: 1
-    vel: 1
-  plant_config:
-    init:
-      pos:
-        - 0.0
-        - 0.0
-        - -5.0
-    task_config:
-      Jfrange:
-        - 0.8
-        - 1.2
-      fvrange:
-        - 0.0
-        - 0.6
-      max_frotors: 2
-      mfrange:
-        - 0.8
-        - 1.2
-      rfrange:
-        - 0.0
-        - 0.4
-  pos_des:
-    - 0.0
-    - 0.0
-    - -5.0
-  reward_weights:
-    action: 0.002
-    angles: 0.1
-    pos: 1
-    vel: 0.2
-tune:
-  config:
-    alpha: 0.2
-    batch_size: 256
-    buffer_size: 1000000
-    learning_starts: 5000
-    log_std_max: 2
-    log_std_min: -5
-    n_envs: 5
-    policy_frequency: 2
-    rf:
-      - 1
-      - 1
-      - 1
-      - 0
-    target_network_frequency: 1
-    tau: 0.005
-    total_timesteps: 20000
+config:
+  alpha: 0.2
+  batch_size: 256
+  buffer_size: 1000000
+  env_config:
+    fkw:
+      dt: 0.02
+      max_t: 6
+    observation_space:
+      eta:
+        high:
+          - 0.3
+          - 0.3
+        low:
+          - -0.3
+          - -0.3
+      omega:
+        high:
+          - 30.0
+          - 30.0
+          - 30.0
+        low:
+          - -30.0
+          - -30.0
+          - -30.0
+      vz:
+        high: 10.0
+        low: -10.0
+    outer_loop: fixed
+    plant_config:
+      init:
+        pos:
+          - 0.0
+          - 0.0
+          - -5.0
+      task_config:
+        Jfrange:
+          - 0.8
+          - 1.2
+        fvrange:
+          - 0.0
+          - 0.6
+        max_frotors: 2
+        mfrange:
+          - 0.8
+          - 1.2
+        rfrange:
+          - 0.0
+          - 0.4
+    pos_des:
+      - 0.0
+      - 0.0
+      - -5.0
+    reset:
+      mode: random
+      perturb_scale:
+        angles: 1
+        omega: 1
+        pos: 1
+        vel: 1
+    reward:
+      Q:
+        - 1
+        - 20
+        - 20
+        - 0.1
+        - 0.1
+        - 0.1
+      R:
+        - 0.1
+        - 0.1
+        - 0.1
+        - 0.1
+      boundsout:
+  fault_occurs: false
+  learning_starts: 5000
+  log_std_max: 2
+  log_std_min: -5
+  mgamma: 0.0156
+  n_envs: 5
+  policy_frequency: 2
+  policy_lr: 0.000222
+  q_lr: 0.00146
+  rf:
+    - 1
+    - 1
+    - 1
+    - 0
+  seed: 0
+  target_network_frequency: 1
+  tau: 0.005
+  total_timesteps: 20000
+tune_config:
+  local_dir:
+  num_samples: 32
