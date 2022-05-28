@@ -172,8 +172,10 @@ class PID:
 
 
 class FixedOuterLoop:
-    def __init__(self):
-        self.F_des_i = np.vstack((0, 0, -1))
+    def __init__(self, env):
+        m = env.plant.m
+        g = env.plant.g
+        self.F_des_i = m * g * np.vstack((0, 0, -1))
 
     def get(self, pos):
         return self.F_des_i
@@ -231,7 +233,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         if env_config["outer_loop"] == "PID":
             self.outer = PIDOuterLoop(self)
         elif env_config["outer_loop"] == "fixed":
-            self.outer = FixedOuterLoop()
+            self.outer = FixedOuterLoop(self)
 
         # -- FOR RL
         # observation: vz (1), eta (2), omega (3) -- TOTAL: 6

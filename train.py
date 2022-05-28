@@ -175,6 +175,7 @@ def sac_trainable(config, checkpoint_dir=None):
     torch.manual_seed(seed)
 
     # make vectorized multiple envs for averaging the results
+    config["env_config"]["outer_loop"] = "fixed"
     envs = DummyVecEnv([make_env(config) for _ in range(config["n_envs"])])
 
     # setup policy
@@ -350,6 +351,25 @@ def sac_trainable(config, checkpoint_dir=None):
     writer.close()
 
 
+def get_trial(fault_occurs=False, nid=None):
+    # get last checkpoint of experiments
+    exppath = Path("exp/origin-hover/SAC/train")
+    if fault_occurs:
+        exppath /= "fault"
+    else:
+        exppath /= "normal"
+    analysis = ExperimentAnalysis(str(exppath))
+    assert analysis.trials is not None
+
+    # get trials and a trial
+    trials = sorted(analysis.trials, key=lambda t: t.trial_id)
+    trial = trials[nid or 0]
+    return trial
+
+
+# -- EXPs
+
+
 def hyperparam_tune():
     expdir = Path("exp/origin-hover/SAC/tune")
     if expdir.exists():
@@ -370,6 +390,11 @@ def hyperparam_tune():
         "num_samples": 32,
         "local_dir": str(expdir),
     }
+
+    # make the default config
+    tune_config = CONFIG["tune_config"]
+    tune_config["config"] = CONFIG["config"]
+    config["env_config"] = CONFIG["env_config"]
 
     # -- CASE: NORMAL
     config["fault_occurs"] = False
@@ -440,22 +465,6 @@ def train_sac():
 
 
 # -- TEST
-
-
-def get_trial(fault_occurs=False, nid=None):
-    # get last checkpoint of experiments
-    exppath = Path("exp/origin-hover/SAC/train")
-    if fault_occurs:
-        exppath /= "fault"
-    else:
-        exppath /= "normal"
-    analysis = ExperimentAnalysis(str(exppath))
-    assert analysis.trials is not None
-
-    # get trials and a trial
-    trials = sorted(analysis.trials, key=lambda t: t.trial_id)
-    trial = trials[nid or 0]
-    return trial
 
 
 def test_sac():
@@ -559,5 +568,5 @@ def test_sac():
 
 if __name__ == "__main__":
     # hyperparam_tune()
-    train_sac()
-    # test_sac()
+    # train_sac()
+    test_sac()
