@@ -1,6 +1,9 @@
+import warnings
+
 import fym
 import gym
 import numpy as np
+import scipy.optimize
 from fym.utils.rot import hat
 from gym import spaces
 from scipy.spatial.transform import Rotation
@@ -62,6 +65,7 @@ class Multicopter(fym.BaseEnv):
         self.omega = fym.BaseSystem(np.zeros((3, 1)))
 
         self.task_config = plant_config["task_config"]
+        self.task = None
 
     def deriv(self, pos, vel, R, omega, rotorfs):
         u = self.B @ rotorfs
@@ -139,6 +143,147 @@ class Multicopter(fym.BaseEnv):
         self.m *= task["mf"]
         self.J = np.diag(task["Jf"]) @ self.J
         self.task = task
+
+    def find_NHS(self):
+        def get_errors(x):
+            """Nonlinear function to be zero.
+
+            Parameters
+            ----------
+            x : array_like, (6 + nrotors,)
+                The optimization variable. Composed of (angles, omega,
+                rotorfs).  angles: phi, theta
+
+            """
+            m, g = self.m, self.g
+            e3 = zB = self.e3
+
+            phi, theta, omega, rotorfs = x[0], x[1], x[2:5], x[5:]
+            R = Rotation.from_euler("ZYX", [0, theta, phi]).as_matrix()
+            omega = omega[:, None]
+            rotorfs = Full @ rotorfs[:, None]
+            rotorfs = self.set_valid(0, rotorfs)
+
+            pos = vel = np.zeros((3, 1))
+            *_, domega = self.deriv(pos, vel, R, omega, rotorfs)
+
+            fT = (self.B @ rotorfs)[0]
+
+            omega_norm = np.linalg.norm(omega)
+            zBomega = zB.T @ omega
+
+            # Construct constraints
+            e1 = fT - m * g * omega_norm / np.abs(zBomega)
+            e2 = np.sign(zBomega) / omega_norm * R @ omega - e3
+            e3 = domega
+
+            errors = [np.square(e).sum() for e in [e1 * 10, e2 * 20, e3]]
+            return errors
+
+        assert self.task is not None, "Task must be set"
+
+        fi = tuple(self.task["fi"])
+        fv = self.task["fv"]
+
+        Full = np.delete(np.eye(self.nrotors), fi, axis=1)
+        n_normal = self.nrotors - len(fi)  # number of healthy rotors
+
+        if fi == (0,):
+            omega0 = [5, 0, 15]
+            rotorfs0 = [4, 1, 4]
+        elif fi == (1,):
+            omega0 = [0, -5, -15]
+            rotorfs0 = [4, 4, 1]
+        elif fi == (2,):
+            omega0 = [-5, 0, 15]
+            rotorfs0 = [1, 4, 4]
+        elif fi == (3,):
+            omega0 = [0, 5, -15]
+            rotorfs0 = [4, 1, 4]
+        elif fi == (0, 1):
+            omega0 = [-25, -10, -20]
+            rotorfs0 = [12, 4]
+        elif fi == (1, 2):
+            omega0 = [-12, 6, 20]
+            rotorfs0 = [6, 2]
+        elif fi == (2, 3):
+            omega0 = [20, 10, -20]
+            rotorfs0 = [12, 4]
+        elif fi == (0, 3):
+            omega0 = [4, -25, 20]
+            rotorfs0 = [12, 4]
+        elif fi == (0, 2):
+            omega0 = [0, -15, 15]
+            rotorfs0 = [10, 4]
+        elif fi == (1, 3):
+            omega0 = [15, 1, -18]
+            rotorfs0 = [10, 3]
+        else:
+            raise ValueError
+
+        x0 = np.hstack(
+            (
+                np.deg2rad([1, 1]),  # angles (phi, theta, psi)
+                omega0,
+                rotorfs0,
+            )
+        )
+
+        bounds = (
+            2 * [np.deg2rad([-80, 80]).tolist()]
+            + 3 * [(-70, 70)]  # omega
+            + n_normal * [(self.rotorf_min, self.rotorf_max)]  # rotors
+        )
+
+        # u = x[5:8]
+        ui = 5
+
+        if len(fi) == 1:
+            left_i = fi[0] % 3  # the rotor left to the fault rotor
+            oppose_i = (left_i + 1) % 3
+            right_i = (left_i + 2) % 3
+
+            constraints = [
+                {
+                    "type": "eq",
+                    "fun": lambda x: x[ui + oppose_i] / x[ui + left_i] - fv,
+                },
+                {"type": "eq", "fun": lambda x: x[ui + left_i] - x[ui + right_i]},
+            ]
+        elif len(fi) == 2:
+            constraints = [
+                {"type": "eq", "fun": lambda x: x[ui + 1] / x[ui] - fv},
+            ]
+        else:
+            constraints = []
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = scipy.optimize.minimize(
+                fun=lambda x: np.sum(get_errors(x)),
+                x0=x0,
+                method="SLSQP",
+                tol=1e-10,
+                bounds=bounds,
+                constraints=constraints,
+                options={},
+            )
+
+        x = result.x
+
+        NHS = {
+            # NHS
+            "omega": x[2:5][:, None],
+            "rotorfs": Full @ x[5:][:, None],
+            # Aux
+            "fi": fi,
+            "fv": fv,
+            "angles": [x[0], x[1], 0],  # phi, theta, psi
+            "R": Rotation.from_euler("ZYX", [0, x[1], x[0]]).as_matrix(),
+            "opt_result": result,
+            "errors": get_errors(x),
+        }
+        return NHS
 
 
 class PID:
@@ -272,6 +417,8 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         # scaling reward for discretization
         self.reward_scale = self.clock.dt
         self.boundsout_reward = env_config["reward"]["boundsout"]
+        self.obs0 = 0
+        self.action0 = 0
 
         # -- TEST ENV
         self.reset_mode = env_config["reset"]["mode"]
@@ -377,8 +524,8 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         return dtype(obs)
 
     def get_reward(self, obs, action):
-        obs = obs[:, None]
-        action = action[:, None]
+        obs = (obs - self.obs0)[:, None]
+        action = (action - self.action0)[:, None]
 
         # hovering reward
         reward = -(obs.T @ self.LQR_Q @ obs + action.T @ self.LQR_R @ action).ravel()
@@ -417,3 +564,15 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         vel = np.vstack((0, 0, vz))
         R = self.eta2R(eta)
         return pos, vel, R, omega
+
+    def set_NHS(self, NHS):
+        omega0 = NHS["omega"].ravel()
+        eta0 = (-omega0 / np.linalg.norm(omega0) * np.sign(omega0[-1]))[:2]
+        obs0 = np.hstack((0, eta0, omega0))
+        action0 = NHS["rotorfs"].ravel()
+
+        self.obs0 = obs0
+        self.action0 = action0
+
+        self.plant.R.initial_state = NHS["R"]
+        self.plant.omega.initial_state = NHS["omega"]

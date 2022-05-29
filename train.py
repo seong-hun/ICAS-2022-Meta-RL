@@ -1,6 +1,6 @@
-import os
 import random
 import time
+from datetime import datetime
 from pathlib import Path
 
 import fym
@@ -22,7 +22,7 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from src.env import QuadEnv
+from src.env import Multicopter, QuadEnv
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -108,18 +108,23 @@ class SAC(nn.Module):
         # setup optimizers
         self.q_optimizer = optim.Adam(
             list(self.qf1.parameters()) + list(self.qf2.parameters()),
-            lr=config["q_lr"],
+            lr=config["exp"]["hyperparameters"]["q_lr"],
         )
         self.actor_optimizer = optim.Adam(
             list(self.actor.parameters()),
-            lr=config["policy_lr"],
+            lr=config["exp"]["hyperparameters"]["policy_lr"],
         )
 
         # with autotune = True
         self.target_entropy = -torch.prod(torch.Tensor(envs.action_space.shape)).item()
         self.log_alpha = torch.zeros(1, requires_grad=True)
         self.alpha = self.log_alpha.exp().item()
-        self.a_optimizer = optim.Adam([self.log_alpha], lr=config["q_lr"])
+        self.a_optimizer = optim.Adam(
+            [self.log_alpha], lr=config["exp"]["hyperparameters"]["q_lr"]
+        )
+
+        self.config = config
+        self.learn_count = 0
 
     def get_action(self, obs, deterministic=False):
         assert isinstance(obs, np.ndarray)
@@ -139,14 +144,121 @@ class SAC(nn.Module):
         else:
             return action
 
+    def learn(self, data):
+        config = self.config
 
-def make_env(env_config, user_task={}):
+        gamma = 1 - config["exp"]["hyperparameters"]["mgamma"]
+
+        with torch.no_grad():
+            next_state_actions, next_state_log_pi, _ = self.actor(
+                data.next_observations
+            )
+            qf1_next_target = self.qf1_target(
+                data.next_observations, next_state_actions
+            )
+            qf2_next_target = self.qf2_target(
+                data.next_observations, next_state_actions
+            )
+            min_qf_next_target = (
+                torch.min(qf1_next_target, qf2_next_target)
+                - self.alpha * next_state_log_pi
+            )
+            if config["env_config"]["reward"]["boundsout"] is None:
+                next_q_value = data.rewards.flatten() + gamma * (
+                    min_qf_next_target
+                ).view(-1)
+            else:
+                next_q_value = data.rewards.flatten() + gamma * (
+                    1 - data.dones.flatten()
+                ) * (min_qf_next_target).view(-1)
+
+        qf1_a_values = self.qf1(data.observations, data.actions).view(-1)
+        qf2_a_values = self.qf2(data.observations, data.actions).view(-1)
+        qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
+        qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
+        qf_loss = qf1_loss + qf2_loss
+
+        self.q_optimizer.zero_grad()
+        qf_loss.backward()
+        self.q_optimizer.step()
+
+        if (
+            self.learn_count % config["policy_frequency"] == 0
+        ):  # TD 3 Delayed update support
+            for _ in range(
+                config["policy_frequency"]
+            ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
+                pi, log_pi, _ = self.actor(data.observations)
+                qf1_pi = self.qf1(data.observations, pi)
+                qf2_pi = self.qf2(data.observations, pi)
+                min_qf_pi = torch.min(qf1_pi, qf2_pi).view(-1)
+                self.actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
+
+                self.actor_optimizer.zero_grad()
+                self.actor_loss.backward()
+                self.actor_optimizer.step()
+
+                # with autotune = True
+                with torch.no_grad():
+                    _, log_pi, _ = self.actor(data.observations)
+                self.alpha_loss = (
+                    -self.log_alpha * (log_pi + self.target_entropy)
+                ).mean()
+
+                self.a_optimizer.zero_grad()
+                self.alpha_loss.backward()
+                self.a_optimizer.step()
+                self.alpha = self.log_alpha.exp().item()
+
+        # update the target networks
+        if self.learn_count % config["target_network_frequency"] == 0:
+            for param, target_param in zip(
+                self.qf1.parameters(), self.qf1_target.parameters()
+            ):
+                target_param.data.copy_(
+                    config["tau"] * param.data + (1 - config["tau"]) * target_param.data
+                )
+            for param, target_param in zip(
+                self.qf2.parameters(), self.qf2_target.parameters()
+            ):
+                target_param.data.copy_(
+                    config["tau"] * param.data + (1 - config["tau"]) * target_param.data
+                )
+
+        self.learn_count += 1
+
+        # write to writer
+        logs = {
+            "losses/qf1_values": qf1_a_values.mean().item(),
+            "losses/qf2_values": qf2_a_values.mean().item(),
+            "losses/qf1_loss": qf1_loss.item(),
+            "losses/qf2_loss": qf2_loss.item(),
+            "losses/qf_loss": qf_loss.item() / 2.0,
+            "losses/actor_loss": self.actor_loss.item(),
+            "losses/alpha": self.alpha,
+            "losses/alpha_loss": self.alpha_loss.item(),
+        }
+
+        return logs
+
+
+def make_env(config):
     def wrapper():
+        # setup the task and update config
+        env_config = config["env_config"]
+        task = config["exp"]["task"]
+        task["rf"][task["fi"]] = 1 - config["exp"]["LoE"]
+
         # make env
         env = QuadEnv(env_config)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        task = env.plant.get_task(**user_task)
+        task = env.plant.get_task(**task)
         env.plant.set_task(task)
+
+        if config["exp"]["hover"] == "near":
+            NHS = env.plant.find_NHS()
+            env.set_NHS(NHS)
+
         return env
 
     return wrapper
@@ -155,18 +267,28 @@ def make_env(env_config, user_task={}):
 def trainable(config):
     """Functional trainable method"""
 
+    # no need of near-hovering for a healthy quadrotor
+    if config["exp"]["hover"] == "near" and config["exp"]["LoE"] != 1.0:
+        return None
+
     # make a trial directory
     equilibrium = config["exp"]["hover"]
     LoE = config["exp"]["LoE"]
     policy_name = config["exp"]["policy"]
+    exp_dir = f"{equilibrium}-hover/LoE-{int(LoE*100):02d}/{policy_name}"
+    logger.info(f"Exp: {exp_dir}")
     trial_dir = (
         Path(config["local_dir"])
-        / f"{equilibrium}-hover"
-        / f"LoE-{int(LoE*100):02d}"
-        / f"{policy_name}"
+        / exp_dir
+        / f"trial_{datetime.now().isoformat(timespec='seconds')}"
     )
 
-    writer = SummaryWriter(trial_dir / "runs")
+    # save the current config
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    with open(trial_dir / "config.yaml", "w") as f:
+        yaml.dump(config, f, Dumper=yaml.SafeDumper)
+
+    writer = SummaryWriter(trial_dir)
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s"
@@ -179,29 +301,14 @@ def trainable(config):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # setup the task
-    env_config = config["env_config"]
-    task = config["exp"]["task"]
-    task["rf"][task["fi"]] = config["exp"]["LoE"]
-
     # make vectorized multiple envs for averaging the results
-    envs = DummyVecEnv([make_env(env_config, task) for _ in range(config["n_envs"])])
+    envs = DummyVecEnv([make_env(config) for _ in range(config["n_envs"])])
 
     # setup policy
     policy = SAC(envs, config)
     policy.to(device)
 
     start = 0
-
-    # load from the past checkpoint
-    if checkpoint_dir:
-        checkpoint = os.path.join(checkpoint_dir, "checkpoint")
-        state = torch.load(checkpoint)
-        start = state["global_step"] + 1
-        policy.load_state_dict(state["policy"])
-
-    # gamma from mgamma
-    gamma = 1 - config["mgamma"]
 
     # create a replay buffer for off-policy RLs
     rb = ReplayBuffer(
@@ -241,107 +348,22 @@ def trainable(config):
         # ALGO LOGIC: training.
         if global_step > config["learning_starts"]:
             data = rb.sample(int(config["batch_size"]))
-            with torch.no_grad():
-                next_state_actions, next_state_log_pi, _ = policy.actor(
-                    data.next_observations
-                )
-                qf1_next_target = policy.qf1_target(
-                    data.next_observations, next_state_actions
-                )
-                qf2_next_target = policy.qf2_target(
-                    data.next_observations, next_state_actions
-                )
-                min_qf_next_target = (
-                    torch.min(qf1_next_target, qf2_next_target)
-                    - policy.alpha * next_state_log_pi
-                )
-                if config["env_config"]["reward"]["boundsout"] is None:
-                    next_q_value = data.rewards.flatten() + gamma * (
-                        min_qf_next_target
-                    ).view(-1)
-                else:
-                    next_q_value = data.rewards.flatten() + gamma * (
-                        1 - data.dones.flatten()
-                    ) * (min_qf_next_target).view(-1)
 
-            qf1_a_values = policy.qf1(data.observations, data.actions).view(-1)
-            qf2_a_values = policy.qf2(data.observations, data.actions).view(-1)
-            qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
-            qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
-            qf_loss = qf1_loss + qf2_loss
+            # train the policy (policy.train is reserved)
+            logs = policy.learn(data)
 
-            policy.q_optimizer.zero_grad()
-            qf_loss.backward()
-            policy.q_optimizer.step()
-
-            if (
-                global_step % config["policy_frequency"] == 0
-            ):  # TD 3 Delayed update support
-                for _ in range(
-                    config["policy_frequency"]
-                ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                    pi, log_pi, _ = policy.actor(data.observations)
-                    qf1_pi = policy.qf1(data.observations, pi)
-                    qf2_pi = policy.qf2(data.observations, pi)
-                    min_qf_pi = torch.min(qf1_pi, qf2_pi).view(-1)
-                    actor_loss = ((policy.alpha * log_pi) - min_qf_pi).mean()
-
-                    policy.actor_optimizer.zero_grad()
-                    actor_loss.backward()
-                    policy.actor_optimizer.step()
-
-                    # with autotune = True
-                    with torch.no_grad():
-                        _, log_pi, _ = policy.actor(data.observations)
-                    alpha_loss = (
-                        -policy.log_alpha * (log_pi + policy.target_entropy)
-                    ).mean()
-
-                    policy.a_optimizer.zero_grad()
-                    alpha_loss.backward()
-                    policy.a_optimizer.step()
-                    policy.alpha = policy.log_alpha.exp().item()
-
-            # update the target networks
-            if global_step % config["target_network_frequency"] == 0:
-                for param, target_param in zip(
-                    policy.qf1.parameters(), policy.qf1_target.parameters()
-                ):
-                    target_param.data.copy_(
-                        config["tau"] * param.data
-                        + (1 - config["tau"]) * target_param.data
-                    )
-                for param, target_param in zip(
-                    policy.qf2.parameters(), policy.qf2_target.parameters()
-                ):
-                    target_param.data.copy_(
-                        config["tau"] * param.data
-                        + (1 - config["tau"]) * target_param.data
-                    )
-
-            # write to writer
+            # logging scalars to tensorboard
             if global_step % 100 == 0:
-                writer.add_scalar(
-                    "losses/qf1_values", qf1_a_values.mean().item(), global_step
-                )
-                writer.add_scalar(
-                    "losses/qf2_values", qf2_a_values.mean().item(), global_step
-                )
-                writer.add_scalar("losses/qf1_loss", qf1_loss.item(), global_step)
-                writer.add_scalar("losses/qf2_loss", qf2_loss.item(), global_step)
-                writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_step)
-                writer.add_scalar("losses/actor_loss", actor_loss.item(), global_step)
-                writer.add_scalar("losses/alpha", policy.alpha, global_step)
-                print("SPS:", int(global_step / (time.time() - start_time)))
+                for k, v in logs.items():
+                    writer.add_scalar(k, v, global_step)
+
+                logger.info(f"SPS: {int(global_step / (time.time() - start_time))}")
                 writer.add_scalar(
                     "charts/SPS",
                     int(global_step / (time.time() - start_time)),
                     global_step,
                 )
-                # with autotune = True
-                writer.add_scalar("losses/alpha_loss", alpha_loss.item(), global_step)
 
-                # TRY NOT TO MODIFY: record rewards for plotting purposes
                 for info in infos:
                     if "episode" in info.keys():
                         writer.add_scalar(
@@ -354,12 +376,12 @@ def trainable(config):
 
             # Save the model into a checkpoint
             if global_step % (config["total_timesteps"] // 20) == 0:
-                with tune.checkpoint_dir(step=global_step) as checkpoint_dir:
-                    path = os.path.join(checkpoint_dir, "checkpoint")
-                    torch.save(
-                        {"policy": policy.state_dict(), "global_step": global_step},
-                        path,
-                    )
+                ndigit = len(str(int(config["total_timesteps"]))) + 1
+                path = trial_dir / f"checkpoint-{global_step:0{ndigit}d}"
+                torch.save(
+                    {"policy": policy.state_dict(), "global_step": global_step},
+                    path,
+                )
 
     envs.close()
     writer.close()
@@ -389,18 +411,6 @@ def setup(user_config):
     return config
 
 
-def get_trial(local_dir, trial_id=None):
-    # get last checkpoint of experiments
-    exp = sorted([str(exp) for exp in Path(local_dir).iterdir() if exp.is_dir()])[-1]
-    analysis = ExperimentAnalysis(exp)
-    assert analysis.trials is not None
-
-    # get trials and a trial
-    trials = sorted(analysis.trials, key=lambda t: t.trial_id)
-    trial = trials[trial_id or 0]
-    return trial
-
-
 def train(tuned_configs):
     @ray.remote
     def remote_trainable(config):
@@ -419,21 +429,21 @@ def train(tuned_configs):
             ),
         }
 
-        # ray.init()
-        # futures = [
-        #     remote_trainable.remote(resolved_config["config"])
-        #     for _ in range(tuned_config["num_samples"])
-        #     for _, resolved_config in generate_variants(tuned_config)
-        # ]
-        # ray.get(futures)
-        # ray.shutdown()
-
-        # for debug
+        ray.init()
         futures = [
-            trainable(resolved_config["config"])
+            remote_trainable.remote(resolved_config["config"])
             for _ in range(tuned_config["num_samples"])
             for _, resolved_config in generate_variants(tuned_config)
         ]
+        ray.get(futures)
+        ray.shutdown()
+
+        # # for debug
+        # futures = [
+        #     trainable(resolved_config["config"])
+        #     for _ in range(tuned_config["num_samples"])
+        #     for _, resolved_config in generate_variants(tuned_config)
+        # ]
 
 
 # -- TEST
@@ -581,7 +591,7 @@ if __name__ == "__main__":
                     "exp": {
                         "hover": tune.grid_search(["origin", "near"]),
                         "LoE": tune.grid_search([0.0, 0.5, 1.0]),
-                        "policy": tune.grid_search(["SAC", "LQL"]),
+                        "policy": "SAC",
                         "hyperparameters": {
                             "mgamma": 0.015,
                             "policy_lr": 0.0004,
