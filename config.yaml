@@ -72,24 +72,43 @@ config:
         - 0.1
         - 0.1
       boundsout:
-  fault_occurs: false
+    task:
+      Jf:
+        - 1.0
+        - 1.0
+        - 1.0
+      fi:
+      fv: 0.5
+      mf: 1.0
+      random: false
+      rf:
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+  exp:
+    LoE: 0.0
+    hover: origin
+    hyperparameters:
+      mgamma: 0.0156
+      policy_lr: 0.000222
+      q_lr: 0.00146
+    policy: SAC
+    task:
+      fi: 3
+      random: false
+      rf:
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
   learning_starts: 5000
+  local_dir: exp
   log_std_max: 2
   log_std_min: -5
-  mgamma: 0.0156
   n_envs: 5
   policy_frequency: 2
-  policy_lr: 0.000222
-  q_lr: 0.00146
-  rf:
-    - 1
-    - 1
-    - 1
-    - 0
   seed: 0
   target_network_frequency: 1
   tau: 0.005
-  total_timesteps: 20000
-tune_config:
-  local_dir:
-  num_samples: 32
+  total_timesteps: 500000

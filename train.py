@@ -1,9 +1,7 @@
 import os
 import random
-import shutil
 import time
 from pathlib import Path
-from pprint import pprint
 
 import fym
 import gym
@@ -16,7 +14,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import yaml
+from loguru import logger
 from ray.tune import ExperimentAnalysis
+from ray.tune.suggest.variant_generator import generate_variants
 from scipy.spatial.transform import Rotation
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
@@ -25,22 +25,6 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from src.env import QuadEnv
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def make_env(config):
-    def wrapper():
-        # make env
-        env = QuadEnv(config["env_config"])
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        if config["fault_occurs"]:
-            # set LoE fault (task)
-            task = env.plant.get_task(rf=config["rf"], random=False)
-        else:
-            task = env.plant.get_task(random=False)
-        env.plant.set_task(task)
-        return env
-
-    return wrapper
 
 
 class Actor(nn.Module):
@@ -156,10 +140,33 @@ class SAC(nn.Module):
             return action
 
 
-def sac_trainable(config, checkpoint_dir=None):
-    """Ray.tune functional trainable method"""
+def make_env(env_config, user_task={}):
+    def wrapper():
+        # make env
+        env = QuadEnv(env_config)
+        env = gym.wrappers.RecordEpisodeStatistics(env)
+        task = env.plant.get_task(**user_task)
+        env.plant.set_task(task)
+        return env
 
-    writer = SummaryWriter("runs")
+    return wrapper
+
+
+def trainable(config):
+    """Functional trainable method"""
+
+    # make a trial directory
+    equilibrium = config["exp"]["hover"]
+    LoE = config["exp"]["LoE"]
+    policy_name = config["exp"]["policy"]
+    trial_dir = (
+        Path(config["local_dir"])
+        / f"{equilibrium}-hover"
+        / f"LoE-{int(LoE*100):02d}"
+        / f"{policy_name}"
+    )
+
+    writer = SummaryWriter(trial_dir / "runs")
     writer.add_text(
         "hyperparameters",
         "|param|value|\n|-|-|\n%s"
@@ -172,9 +179,13 @@ def sac_trainable(config, checkpoint_dir=None):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+    # setup the task
+    env_config = config["env_config"]
+    task = config["exp"]["task"]
+    task["rf"][task["fi"]] = config["exp"]["LoE"]
+
     # make vectorized multiple envs for averaging the results
-    config["env_config"]["outer_loop"] = "fixed"
-    envs = DummyVecEnv([make_env(config) for _ in range(config["n_envs"])])
+    envs = DummyVecEnv([make_env(env_config, task) for _ in range(config["n_envs"])])
 
     # setup policy
     policy = SAC(envs, config)
@@ -358,12 +369,15 @@ def setup(user_config):
     """Get the user-defined config"""
 
     def update(base, new):
-        assert isinstance(base, dict)
-        assert isinstance(new, dict)
+        assert isinstance(base, dict), f"{base} is not a dict"
+        assert isinstance(new, dict), f"{new} is not a dict"
         for k, v in new.items():
-            assert k in base
+            assert k in base, f"{k} not in {base}"
             if isinstance(v, dict):
-                update(base[k], v)
+                if "grid_search" in v:
+                    base[k] = v
+                else:
+                    update(base[k], v)
             else:
                 base[k] = v
 
@@ -387,62 +401,17 @@ def get_trial(local_dir, trial_id=None):
     return trial
 
 
-# -- EXPs
+def train(tuned_configs):
+    @ray.remote
+    def remote_trainable(config):
+        return trainable(config)
 
-
-def hyperparam_tune():
-    # setup tune search space
-
-    # -- CASE: NORMAL
-
-    config = {
-        "seed": tune.randint(0, 100000),
-        "mgamma": tune.loguniform(1e-1, 1e-3),  # gamma = 1 - mgamma
-        "q_lr": tune.loguniform(1e-4, 1e-2),
-        "policy_lr": tune.loguniform(1e-4, 1e-2),
-        "fault_occurs": False,
-        "env_config": {"outer_loop": "fixed"},
-    }
-
-    tune_config = {
-        "local_dir": "exp/origin-hover/SAC/tune/normal",
-        "num_samples": 32,
-    }
-
-    ray.init()
-    config = setup(config)
-    tune.run(sac_trainable, config=config, **tune_config)
-    ray.shutdown()
-
-    # -- CASE: FAULT
-
-    config = {
-        "seed": tune.randint(0, 100000),
-        "mgamma": tune.loguniform(1e-1, 1e-3),  # gamma = 1 - mgamma
-        "q_lr": tune.loguniform(1e-4, 1e-2),
-        "policy_lr": tune.loguniform(1e-4, 1e-2),
-        "fault_occurs": True,
-        "env_config": {"outer_loop": "fixed"},
-    }
-
-    tune_config = {
-        "local_dir": "exp/origin-hover/SAC/tune/fault",
-        "num_samples": 32,
-    }
-
-    ray.init()
-    config = setup(config)
-    tune.run(sac_trainable, **tune_config)
-    ray.shutdown()
-
-
-def train_sac(user_tune_configs):
-    for user_tune_config in user_tune_configs:
-        tune_config = {
-            "local_dir": user_tune_config["local_dir"],
-            "num_samples": 5,
+    for tuned_config in tuned_configs:
+        tuned_config = {
+            "local_dir": "exp",
+            "num_samples": tuned_config["num_samples"],
             "config": setup(
-                user_tune_config["config"]
+                tuned_config["config"]
                 | {
                     "seed": tune.randint(0, 100000),
                     "total_timesteps": 500000,
@@ -450,9 +419,21 @@ def train_sac(user_tune_configs):
             ),
         }
 
-        ray.init()
-        tune.run(sac_trainable, **tune_config)
-        ray.shutdown()
+        # ray.init()
+        # futures = [
+        #     remote_trainable.remote(resolved_config["config"])
+        #     for _ in range(tuned_config["num_samples"])
+        #     for _, resolved_config in generate_variants(tuned_config)
+        # ]
+        # ray.get(futures)
+        # ray.shutdown()
+
+        # for debug
+        futures = [
+            trainable(resolved_config["config"])
+            for _ in range(tuned_config["num_samples"])
+            for _, resolved_config in generate_variants(tuned_config)
+        ]
 
 
 # -- TEST
@@ -461,8 +442,8 @@ def train_sac(user_tune_configs):
 def test_sac():
     # get a checkpoint
     trial = get_trial(
-        local_dir="exp/origin-hover/outer-fixed-no-terminal/SAC/normal",
-        trial_id=2,
+        local_dir="exp/origin-hover/outer-fixed-with-terminal/SAC/normal",
+        trial_id=1,
     )
     config = trial.config
     assert trial.logdir is not None
@@ -473,7 +454,7 @@ def test_sac():
     config = setup(
         {
             "seed": 0,
-            "fault_occurs": False,
+            "fault_occurs": config["fault_occurs"],
             "env_config": {
                 "fkw": {
                     "max_t": 20,
@@ -483,6 +464,14 @@ def test_sac():
             },
         }
     )
+
+    # seeding
+    seed = config["seed"]
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    # make env
     env = make_env(config)()
     # add a fym logger to the env
     env.env.logger = fym.Logger(path=testpath)
@@ -498,6 +487,9 @@ def test_sac():
             if ckpt.is_dir()
         ]
     )[-1]
+    logger.info(
+        f'Loaded: {Path(checkpoint).relative_to(Path("exp/origin-hover").resolve())}'
+    )
     # checkpoint = os.path.join(trial.checkpoint.value, "checkpoint")
     state = torch.load(checkpoint)
     # load policy from the checkpoint
@@ -579,48 +571,26 @@ def test_sac():
 
 if __name__ == "__main__":
     # hyperparam_tune()
-    train_sac(
+
+    train(
         [
             {
-                "local_dir": "exp/origin-hover/outer-fixed-no-terminal/SAC/normal",
+                "num_samples": 5,
                 "config": {
-                    "mgamma": 0.0156,
-                    "policy_lr": 0.000222,
-                    "q_lr": 0.00146,
-                    "fault_occurs": False,
-                    "env_config": {"outer_loop": "fixed"},
-                },
-            },
-            {
-                "local_dir": "exp/origin-hover/outer-fixed-no-terminal/SAC/fault",
-                "config": {
-                    "mgamma": 0.0914,
-                    "policy_lr": 0.00504,
-                    "q_lr": 0.00131,
-                    "fault_occurs": True,
-                    "env_config": {"outer_loop": "fixed"},
-                },
-            },
-            {
-                "local_dir": "exp/origin-hover/outer-PID-no-terminal/SAC/normal",
-                "config": {
-                    "mgamma": 0.0156,
-                    "policy_lr": 0.000222,
-                    "q_lr": 0.00146,
-                    "fault_occurs": False,
-                    "env_config": {"outer_loop": "PID"},
-                },
-            },
-            {
-                "local_dir": "exp/origin-hover/outer-PID-no-terminal/SAC/fault",
-                "config": {
-                    "mgamma": 0.0914,
-                    "policy_lr": 0.00504,
-                    "q_lr": 0.00131,
-                    "fault_occurs": True,
-                    "env_config": {"outer_loop": "PID"},
+                    "local_dir": "exp",
+                    "exp": {
+                        "hover": tune.grid_search(["origin", "near"]),
+                        "LoE": tune.grid_search([0.0, 0.5, 1.0]),
+                        "policy": tune.grid_search(["SAC", "LQL"]),
+                        "hyperparameters": {
+                            "mgamma": 0.015,
+                            "policy_lr": 0.0004,
+                            "q_lr": 0.0014,
+                        },
+                    },
                 },
             },
         ]
     )
+
     # test_sac()
