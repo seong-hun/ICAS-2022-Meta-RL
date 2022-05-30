@@ -1,6 +1,8 @@
+import argparse
 import random
 import time
 from datetime import datetime
+from itertools import count
 from pathlib import Path
 
 import fym
@@ -15,18 +17,18 @@ import torch.nn.functional as F
 import torch.optim as optim
 import yaml
 from loguru import logger
-from ray.tune import ExperimentAnalysis
 from ray.tune.suggest.variant_generator import generate_variants
 from scipy.spatial.transform import Rotation
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from src.env import Multicopter, QuadEnv
+from src.env import QuadEnv
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+# SAC {{{
 class Actor(nn.Module):
     def __init__(self, env, config):
         super().__init__()
@@ -108,11 +110,11 @@ class SAC(nn.Module):
         # setup optimizers
         self.q_optimizer = optim.Adam(
             list(self.qf1.parameters()) + list(self.qf2.parameters()),
-            lr=config["exp"]["hyperparameters"]["q_lr"],
+            lr=config["hyperparameters"]["q_lr"],
         )
         self.actor_optimizer = optim.Adam(
             list(self.actor.parameters()),
-            lr=config["exp"]["hyperparameters"]["policy_lr"],
+            lr=config["hyperparameters"]["policy_lr"],
         )
 
         # with autotune = True
@@ -120,7 +122,7 @@ class SAC(nn.Module):
         self.log_alpha = torch.zeros(1, requires_grad=True)
         self.alpha = self.log_alpha.exp().item()
         self.a_optimizer = optim.Adam(
-            [self.log_alpha], lr=config["exp"]["hyperparameters"]["q_lr"]
+            [self.log_alpha], lr=config["hyperparameters"]["q_lr"]
         )
 
         self.config = config
@@ -147,7 +149,7 @@ class SAC(nn.Module):
     def learn(self, data):
         config = self.config
 
-        gamma = 1 - config["exp"]["hyperparameters"]["mgamma"]
+        gamma = 1 - config["hyperparameters"]["mgamma"]
 
         with torch.no_grad():
             next_state_actions, next_state_log_pi, _ = self.actor(
@@ -242,58 +244,145 @@ class SAC(nn.Module):
         return logs
 
 
+# }}}
+
+
+class OUNoise:
+    def __init__(self, action_dim, mu=0, theta=0.15, sigma=0.2):
+        self.action_dim = action_dim
+        self.mu = mu
+        self.theta = theta
+        self.sigma = sigma
+        self.X = np.ones(self.action_dim) * self.mu
+
+    def reset(self):
+        self.X = np.ones(self.action_dim) * self.mu
+
+    def sample(self):
+        dx = self.theta * (self.mu - self.X)
+        dx = dx + self.sigma * np.random.randn(*self.X.shape)
+        self.X = self.X + dx
+        return self.X
+
+
+class LinearPolicy:
+    def __init__(self, K, obs0, action0, noisy=False):
+        self.K = K
+        self.obs0 = obs0
+        self.action0 = action0
+        self.noise = OUNoise(4, sigma=0.05) if noisy else 0
+
+    def reset(self):
+        if isinstance(self.noise, OUNoise):
+            self.noise.reset()
+
+    def get_action(self, obs):
+        if isinstance(self.noise, OUNoise):
+            noise = self.noise.sample()
+        else:
+            noise = self.noise
+
+        if obs.ndim == 1:
+            action = (
+                self.action0 - (self.K @ (obs - self.obs0)[:, None]).ravel() + noise
+            )
+        elif obs.ndim == 2:
+            action = np.vstack(
+                [
+                    self.action0 - (self.K @ (o - self.obs0)[:, None]).ravel() + noise
+                    for o in obs
+                ]
+            )
+        else:
+            raise ValueError
+
+        return action
+
+
 def make_env(config):
+    # setup the task and update config
+    env_config = config["env_config"]
+    task = config["exp"]["task"]
+    task["rf"][task["fi"]] = 1 - config["exp"]["LoE"]
+
+    # make env
+    env = QuadEnv(env_config)
+    task = env.plant.get_task(**task)
+    env.plant.set_task(task)
+
+    NHS = env.plant.find_NHS()
+    env.set_NHS(NHS)
+    return env
+
+
+def make_env_fn(config):
     def wrapper():
-        # setup the task and update config
-        env_config = config["env_config"]
-        task = config["exp"]["task"]
-        task["rf"][task["fi"]] = 1 - config["exp"]["LoE"]
-
-        # make env
-        env = QuadEnv(env_config)
+        env = make_env(config)
         env = gym.wrappers.RecordEpisodeStatistics(env)
-        task = env.plant.get_task(**task)
-        env.plant.set_task(task)
-
-        if config["exp"]["hover"] == "near":
-            NHS = env.plant.find_NHS()
-            env.set_NHS(NHS)
-
         return env
 
     return wrapper
 
 
-def trainable(config):
+def setup(user_config):
+    """Get the user-defined config"""
+
+    def update(base, new):
+        assert isinstance(base, dict), f"{base} is not a dict"
+        assert isinstance(new, dict), f"{new} is not a dict"
+        for k, v in new.items():
+            assert k in base, f"{k} not in {base}"
+            if isinstance(v, dict):
+                if "grid_search" in v:
+                    base[k] = v
+                else:
+                    update(base[k], v)
+            else:
+                base[k] = v
+
+    with open("config.yaml", "r") as f:
+        config = yaml.load(f, Loader=yaml.SafeLoader)
+
+    update(config, user_config)
+    return config
+
+
+def rollout(env, policy, num_trans, render=False):
+    flogger = fym.Logger(max_len=num_trans, mode="deque")
+
+    for n_traj in count(1):
+        o = env.reset()
+        policy.reset()
+
+        while True:
+            if render:
+                env.render()
+
+            a = policy.get_action(o)
+            next_o, r, d, _ = env.step(a)
+
+            if not d:
+                flogger.record(o=o, a=a, next_o=next_o, r=r, d=d)
+
+            o = next_o
+
+            n_trans = len(flogger)
+
+            if n_trans % (num_trans // 10) == 0:
+                logger.debug(f"Gathered {n_trans}/{num_trans} transitions")
+
+            if d or n_trans >= num_trans:
+                break
+
+        if n_trans >= num_trans:
+            break
+
+    info = {"n_traj": n_traj}
+    return flogger.buffer, info
+
+
+def trainable(config: dict, idx: int = 0):
     """Functional trainable method"""
-
-    # no need of near-hovering for a healthy quadrotor
-    if config["exp"]["hover"] == "near" and config["exp"]["LoE"] != 1.0:
-        return None
-
-    # make a trial directory
-    equilibrium = config["exp"]["hover"]
-    LoE = config["exp"]["LoE"]
-    policy_name = config["exp"]["policy"]
-    exp_dir = f"{equilibrium}-hover/LoE-{int(LoE*100):02d}/{policy_name}"
-    logger.info(f"Exp: {exp_dir}")
-    trial_dir = (
-        Path(config["local_dir"])
-        / exp_dir
-        / f"trial_{datetime.now().isoformat(timespec='seconds')}"
-    )
-
-    # save the current config
-    trial_dir.mkdir(parents=True, exist_ok=True)
-    with open(trial_dir / "config.yaml", "w") as f:
-        yaml.dump(config, f, Dumper=yaml.SafeDumper)
-
-    writer = SummaryWriter(trial_dir)
-    writer.add_text(
-        "hyperparameters",
-        "|param|value|\n|-|-|\n%s"
-        % ("\n".join([f"|{key}|{value}|" for key, value in config.items()])),
-    )
 
     # seeding
     seed = config["seed"]
@@ -301,16 +390,69 @@ def trainable(config):
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+    # make a taskdir
+    equilibrium = config["exp"]["hover"]
+    LoE = config["exp"]["LoE"]
+    taskdir = Path(config["expdir"], f"{equilibrium}-hover/LoE-{int(LoE*100):02d}")
+    taskdir.mkdir(parents=True, exist_ok=True)
+
+    # get dataset
+    datasetpath = taskdir / "dataset.pth"
+
+    if not datasetpath.exists():
+        logger.info(f"There is no {datasetpath}")
+        logger.info("Create a dataset")
+
+        env = make_env(config)
+
+        # Set a behavior policy
+        params = env.get_mueller_params()
+        K = params["udist"] @ params["K"]
+
+        policy = LinearPolicy(
+            K=K,
+            obs0=env.NHS["obs"],
+            action0=env.NHS["action"],
+            noisy=True,
+        )
+
+        # create a replay buffer for off-policy RLs
+        data, rollout_info = rollout(env, policy, num_trans=config["num_trans"])
+
+        sample = {
+            "data": data,
+            "config": config,
+        }
+        torch.save(sample, datasetpath)
+        logger.info(f"Data was saved in {datasetpath} | Traj: {rollout_info['n_traj']}")
+
+    dataset = torch.load(datasetpath)
+
+    breakpoint()
+
+    # make a trial dir
+    trialdir = taskdir / config["exp"]["policy"] / f"trial-{idx:0{len(str(idx))+1}d}"
+    trialdir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Trial: {trialdir}")
+
+    # save the current config
+    with open(trialdir / "config.yaml", "w") as f:
+        yaml.dump(config, f, Dumper=yaml.SafeDumper)
+
+    writer = SummaryWriter(trialdir)
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s"
+        % ("\n".join([f"|{key}|{value}|" for key, value in config.items()])),
+    )
+
     # make vectorized multiple envs for averaging the results
-    envs = DummyVecEnv([make_env(config) for _ in range(config["n_envs"])])
+    envs = DummyVecEnv([make_env_fn(config) for _ in range(config["n_envs"])])
 
     # setup policy
     policy = SAC(envs, config)
     policy.to(device)
 
-    start = 0
-
-    # create a replay buffer for off-policy RLs
     rb = ReplayBuffer(
         buffer_size=int(config["buffer_size"]),
         observation_space=envs.observation_space,
@@ -319,9 +461,10 @@ def trainable(config):
         n_envs=config["n_envs"],
         handle_timeout_termination=True,
     )
-    start_time = time.time()
 
-    # TRY NOT TO MODIFY: start the game
+    # start the game
+    start_time = time.time()
+    start = 0
     obs = envs.reset()
     for global_step in range(start, int(config["total_timesteps"])):
         # ALGO LOGIC: put action logic here
@@ -387,68 +530,57 @@ def trainable(config):
     writer.close()
 
 
-def setup(user_config):
-    """Get the user-defined config"""
+def train_exp1(no_ray=False):
+    expdir = f"exp/exp1_{datetime.now().isoformat(timespec='seconds')}"
 
-    def update(base, new):
-        assert isinstance(base, dict), f"{base} is not a dict"
-        assert isinstance(new, dict), f"{new} is not a dict"
-        for k, v in new.items():
-            assert k in base, f"{k} not in {base}"
-            if isinstance(v, dict):
-                if "grid_search" in v:
-                    base[k] = v
-                else:
-                    update(base[k], v)
-            else:
-                base[k] = v
+    exp_configs = [
+        {
+            "exp": {
+                "hover": "origin",
+                "LoE": tune.grid_search([0.0, 0.5, 1.0]),
+                "policy": tune.grid_search(["SAC", "LQL"]),
+            },
+            "seed": tune.randint(0, 100000),
+            "total_timesteps": 500000,
+            "expdir": expdir,
+        },
+        {
+            "exp": {
+                "hover": "near",
+                "LoE": 1.0,
+                "policy": tune.grid_search(["SAC", "LQL"]),
+            },
+            "seed": tune.randint(0, 100000),
+            "total_timesteps": 500000,
+            "expdir": expdir,
+        },
+    ]
 
-    with open("config.yaml", "r") as f:
-        CONFIG = yaml.load(f, Loader=yaml.SafeLoader)
+    if no_ray:
+        futures = [
+            trainable(setup(config), i)
+            for exp_config in exp_configs
+            for i in range(5)
+            for _, config in generate_variants(exp_config)
+        ]
+    else:
 
-    config = CONFIG["config"]
-    update(config, user_config)
-    return config
-
-
-def train(tuned_configs):
-    @ray.remote
-    def remote_trainable(config):
-        return trainable(config)
-
-    for tuned_config in tuned_configs:
-        tuned_config = {
-            "local_dir": "exp",
-            "num_samples": tuned_config["num_samples"],
-            "config": setup(
-                tuned_config["config"]
-                | {
-                    "seed": tune.randint(0, 100000),
-                    "total_timesteps": 500000,
-                }
-            ),
-        }
+        @ray.remote
+        def remote_trainable(config, i):
+            return trainable(config, i)
 
         ray.init()
         futures = [
-            remote_trainable.remote(resolved_config["config"])
-            for _ in range(tuned_config["num_samples"])
-            for _, resolved_config in generate_variants(tuned_config)
+            remote_trainable.remote(setup(config), i)
+            for exp_config in exp_configs
+            for i in range(5)
+            for _, config in generate_variants(exp_config)
         ]
         ray.get(futures)
         ray.shutdown()
 
-        # # for debug
-        # futures = [
-        #     trainable(resolved_config["config"])
-        #     for _ in range(tuned_config["num_samples"])
-        #     for _, resolved_config in generate_variants(tuned_config)
-        # ]
 
-
-# -- TEST
-
-
+# TEST {{{
 def test_sac():
     # get a checkpoint
     trial = get_trial(
@@ -579,28 +711,16 @@ def test_sac():
     plt.show()
 
 
-if __name__ == "__main__":
-    # hyperparam_tune()
+# }}}
 
-    train(
-        [
-            {
-                "num_samples": 5,
-                "config": {
-                    "local_dir": "exp",
-                    "exp": {
-                        "hover": tune.grid_search(["origin", "near"]),
-                        "LoE": tune.grid_search([0.0, 0.5, 1.0]),
-                        "policy": "SAC",
-                        "hyperparameters": {
-                            "mgamma": 0.015,
-                            "policy_lr": 0.0004,
-                            "q_lr": 0.0014,
-                        },
-                    },
-                },
-            },
-        ]
-    )
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-n", "--no-ray", action="store_true")
+    args = parser.parse_args()
+
+    train_exp1(**vars(args))
+
+    # hyperparam_tune()
 
     # test_sac()

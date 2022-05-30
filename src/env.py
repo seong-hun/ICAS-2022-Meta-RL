@@ -1,3 +1,4 @@
+import functools
 import warnings
 
 import fym
@@ -185,6 +186,24 @@ class Multicopter(fym.BaseEnv):
         fi = tuple(self.task["fi"])
         fv = self.task["fv"]
 
+        if fi == ():
+            NHS = {
+                # NHS
+                "omega": np.zeros((3, 1)),
+                "rotorfs": self.m * self.g * np.ones((4, 1)) / 4,
+                # equilibrium
+                "obs": np.zeros(6),
+                "action": np.zeros(4),
+                # Aux
+                "fi": fi,
+                "fv": fv,
+                "angles": [0, 0, 0],
+                "R": np.eye(3),
+                "opt_result": None,
+                "errors": None,
+            }
+            return NHS
+
         Full = np.delete(np.eye(self.nrotors), fi, axis=1)
         n_normal = self.nrotors - len(fi)  # number of healthy rotors
 
@@ -271,10 +290,21 @@ class Multicopter(fym.BaseEnv):
 
         x = result.x
 
+        omega = x[2:5][:, None]
+        rotorfs = Full @ x[5:][:, None]
+
+        omega0 = omega.ravel()
+        eta0 = (-omega0 / np.linalg.norm(omega0) * np.sign(omega0[-1]))[:2]
+        obs = np.hstack((0, eta0, omega0))
+        action = rotorfs.ravel()
+
         NHS = {
             # NHS
-            "omega": x[2:5][:, None],
-            "rotorfs": Full @ x[5:][:, None],
+            "omega": omega,
+            "rotorfs": rotorfs,
+            # equilibrium
+            "obs": obs,
+            "action": action,
             # Aux
             "fi": fi,
             "fv": fv,
@@ -424,6 +454,9 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         self.reset_mode = env_config["reset"]["mode"]
         self.pscale = env_config["reset"]["perturb_scale"]
 
+        # NHS
+        self.NHS = {}
+
     def reset(self):
         """Reset the plant states.
 
@@ -566,13 +599,67 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         return pos, vel, R, omega
 
     def set_NHS(self, NHS):
-        omega0 = NHS["omega"].ravel()
-        eta0 = (-omega0 / np.linalg.norm(omega0) * np.sign(omega0[-1]))[:2]
-        obs0 = np.hstack((0, eta0, omega0))
-        action0 = NHS["rotorfs"].ravel()
+        assert self.NHS == {}
+        self.NHS = NHS
 
-        self.obs0 = obs0
-        self.action0 = action0
+        self.obs0 = NHS["obs"]
+        self.action0 = NHS["action"]
 
         self.plant.R.initial_state = NHS["R"]
         self.plant.omega.initial_state = NHS["omega"]
+
+    def get_mueller_params(self):
+        def deriv(x, u):
+            vz, eta, omega = x[0], x[1:3], x[3:]
+
+            pos = np.zeros((3, 1))
+            vel = np.vstack((0, 0, vz))
+            R = self.eta2R(eta)
+            rotors = hrotorfs + udist @ u
+            rotors[(fi,)] = 0
+
+            _, vel_dot, _, omega_dot = plant.deriv(pos, vel, R, omega, rotors)
+
+            n3 = np.vstack((eta, -np.sqrt(1 - (eta**2).sum())))
+            n_dot = -np.cross(omega, n3, axis=0)
+
+            return np.vstack((vel_dot[2], n_dot[:2], omega_dot))
+
+        assert self.plant.task is not None
+        assert self.NHS is not None
+
+        plant = self.plant
+        fi = self.plant.task["fi"]
+        hrotorfs = self.NHS["rotorfs"]
+
+        # Number of healthy rotors
+        N = plant.nrotors - len(fi)
+
+        udist = functools.reduce(
+            lambda p, q: np.insert(p, q, np.zeros(N - 1), axis=0),
+            fi,
+            np.vstack((np.eye(N - 1), -np.ones(N - 1))),
+        )
+
+        # LQR control gains
+        Q = np.diag([5, 20, 20, 0, 0, 0])
+        R = np.diag(np.ones(N - 1))
+
+        # # Rotor forces without faulty rotors
+        # partial_hover_rotorfs = np.delete(hrotorfs, fi, axis=0)
+
+        # Linearized
+        x0 = self.NHS["obs"][:, None]
+        u0 = np.zeros((N - 1, 1))
+        A = fym.jacob_analytic(deriv, 0)(x0, u0)[:, :, 0]
+        B = fym.jacob_analytic(deriv, 1)(x0, u0)[:, :, 0]
+        K, _ = fym.clqr(A, B, Q, R)
+
+        return {
+            "udist": udist,
+            # "x0": x0,
+            "K": K,
+            # "Ccb": Ccb,
+            # "nbdnc": nbdnc.ravel(),
+            # "partial_hover_rotorfs": partial_hover_rotorfs,
+        }

@@ -1,114 +1,114 @@
-config:
-  alpha: 0.2
-  batch_size: 256
-  buffer_size: 1000000
-  env_config:
-    fkw:
-      dt: 0.02
-      max_t: 6
-    observation_space:
-      eta:
-        high:
-          - 0.3
-          - 0.3
-        low:
-          - -0.3
-          - -0.3
-      omega:
-        high:
-          - 30.0
-          - 30.0
-          - 30.0
-        low:
-          - -30.0
-          - -30.0
-          - -30.0
-      vz:
-        high: 10.0
-        low: -10.0
-    outer_loop: fixed
-    plant_config:
-      init:
-        pos:
-          - 0.0
-          - 0.0
-          - -5.0
-      task_config:
-        Jfrange:
-          - 0.8
-          - 1.2
-        fvrange:
-          - 0.0
-          - 0.6
-        max_frotors: 2
-        mfrange:
-          - 0.8
-          - 1.2
-        rfrange:
-          - 0.0
-          - 0.6
-    pos_des:
-      - 0.0
-      - 0.0
-      - -5.0
-    reset:
-      mode: random
-      perturb_scale:
-        angles: 1
-        omega: 1
-        pos: 1
-        vel: 1
-    reward:
-      Q:
-        - 1
-        - 20
-        - 20
-        - 0.1
-        - 0.1
-        - 0.1
-      R:
-        - 0.1
-        - 0.1
-        - 0.1
-        - 0.1
-      boundsout:
-    task:
-      Jf:
-        - 1.0
-        - 1.0
-        - 1.0
-      fi:
-      fv: 0.5
-      mf: 1.0
-      random: false
-      rf:
-        - 1.0
-        - 1.0
-        - 1.0
-        - 1.0
-  exp:
-    LoE: 0.0
-    hover: origin
-    hyperparameters:
-      mgamma: 0.0156
-      policy_lr: 0.000222
-      q_lr: 0.00146
-    policy: SAC
-    task:
-      fi: 3
-      random: false
-      rf:
-        - 1.0
-        - 1.0
-        - 1.0
-        - 1.0
-  learning_starts: 5000
-  local_dir: exp
-  log_std_max: 2
-  log_std_min: -5
-  n_envs: 5
-  policy_frequency: 2
-  seed: 0
-  target_network_frequency: 1
-  tau: 0.005
-  total_timesteps: 500000
+alpha: 0.2
+batch_size: 256
+buffer_size: 1000000
+env_config:
+  fkw:
+    dt: 0.02
+    max_t: 6
+  observation_space:
+    eta:
+      high:
+        - 0.3
+        - 0.3
+      low:
+        - -0.3
+        - -0.3
+    omega:
+      high:
+        - 30.0
+        - 30.0
+        - 30.0
+      low:
+        - -30.0
+        - -30.0
+        - -30.0
+    vz:
+      high: 10.0
+      low: -10.0
+  outer_loop: fixed
+  plant_config:
+    init:
+      pos:
+        - 0.0
+        - 0.0
+        - -5.0
+    task_config:
+      Jfrange:
+        - 0.8
+        - 1.2
+      fvrange:
+        - 0.0
+        - 0.6
+      max_frotors: 2
+      mfrange:
+        - 0.8
+        - 1.2
+      rfrange:
+        - 0.0
+        - 0.6
+  pos_des:
+    - 0.0
+    - 0.0
+    - -5.0
+  reset:
+    mode: neighbor
+    perturb_scale:
+      angles: 1
+      omega: 1
+      pos: 1
+      vel: 1
+  reward:
+    Q:
+      - 1
+      - 20
+      - 20
+      - 0.1
+      - 0.1
+      - 0.1
+    R:
+      - 0.1
+      - 0.1
+      - 0.1
+      - 0.1
+    boundsout:
+  task:
+    Jf:
+      - 1.0
+      - 1.0
+      - 1.0
+    fi:
+    fv: 0.5
+    mf: 1.0
+    random: false
+    rf:
+      - 1.0
+      - 1.0
+      - 1.0
+      - 1.0
+exp:
+  LoE: 0.0
+  hover: origin
+  policy: SAC
+  task:
+    fi: 3
+    random: false
+    rf:
+      - 1.0
+      - 1.0
+      - 1.0
+      - 1.0
+expdir: exp
+hyperparameters:
+  mgamma: 0.0156
+  policy_lr: 0.000222
+  q_lr: 0.00146
+learning_starts: 5000
+log_std_max: 2
+log_std_min: -5
+n_envs: 5
+num_trans: 10000
+policy_frequency: 2
+seed: 0
+target_network_frequency: 1
+tau: 0.005
+total_timesteps: 500000
