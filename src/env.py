@@ -468,35 +468,37 @@ class QuadEnv(fym.BaseEnv, gym.Env):
 
         if self.reset_mode == "neighbor":
             angles = Rotation.from_matrix(self.plant.R.state).as_euler("ZYX")
-            angles = np.deg2rad(
-                np.random.normal(loc=angles, scale=self.pscale["angles"])
+            angles = np.random.uniform(
+                low=angles - np.deg2rad(self.pscale["angles_deg"]),
+                high=angles + np.deg2rad(self.pscale["angles_deg"]),
             )
-            self.plant.pos.state = np.random.normal(
-                loc=self.plant.pos.state,
-                scale=self.pscale["pos"],
+            self.plant.pos.state = np.random.uniform(
+                low=self.plant.pos.state - self.pscale["pos"],
+                high=self.plant.pos.state + self.pscale["pos"],
             )
-            self.plant.vel.state = np.random.normal(
-                loc=self.plant.vel.state,
-                scale=self.pscale["vel"],
+            self.plant.vel.state = np.random.uniform(
+                low=self.plant.vel.state - self.pscale["vel"],
+                high=self.plant.vel.state + self.pscale["vel"],
             )
             self.plant.R.state = Rotation.from_euler("ZYX", angles).as_matrix()
-            self.plant.omega.state = np.random.normal(
-                loc=self.plant.omega.state, scale=self.pscale["omega"]
+            self.plant.omega.state = np.random.uniform(
+                low=self.plant.omega.state - self.pscale["omega"],
+                high=self.plant.omega.state + self.pscale["omega"],
             )
-        elif self.reset_mode == "random":
-            obs = np.float64(self.observation_space.sample())
-            pos, vel, R, omega = self.obs2state(obs)
-            self.plant.pos.state = pos
-            self.plant.vel.state = vel
-            self.plant.R.state = R
-            self.plant.omega.state = omega
+        # elif self.reset_mode == "random":
+        #     obs = np.float64(self.observation_space.sample())
+        #     pos, vel, R, omega = self.obs2state(obs)
+        #     self.plant.pos.state = pos
+        #     self.plant.vel.state = vel
+        #     self.plant.R.state = R
+        #     self.plant.omega.state = omega
         elif self.reset_mode == "initial":
             pass
         else:
             raise ValueError
 
         obs = self.observation()
-        assert self.observation_space.contains(obs), breakpoint()
+        assert self.contains(obs), breakpoint()
 
         return obs
 
@@ -520,11 +522,23 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         next_obs = self.observation()
         reward = self.get_reward(obs, action)
         # get done
-        bounds_out = not self.observation_space.contains(next_obs)
+        bounds_out = not self.contains(next_obs)
         done = done or bounds_out
         # get info
         info = {}
         return next_obs, reward, done, info
+
+    def contains(self, obs):
+        if 1 - (etasq := sum(obs[1:3] ** 2)) < 0:
+            return False
+        bi = [0, 3, 4, 5]  # box indices
+        contains = (
+            obs.shape == self.observation_space.shape
+            and np.all((obs - self.obs0)[bi] > self.observation_space.low[bi])
+            and np.all((obs - self.obs0)[bi] < self.observation_space.high[bi])
+            and np.arccos(np.sqrt(etasq) / 1) > np.deg2rad(15)
+        )
+        return contains
 
     def set_dot(self, t, action):
         # make a 2d vector from an 1d array

@@ -8,23 +8,23 @@ env_config:
   observation_space:
     eta:
       high:
-        - 0.3
-        - 0.3
+        - 0.7
+        - 0.7
       low:
-        - -0.3
-        - -0.3
+        - -0.7
+        - -0.7
     omega:
       high:
-        - 30.0
-        - 30.0
-        - 30.0
+        - 5.0
+        - 5.0
+        - 5.0
       low:
-        - -30.0
-        - -30.0
-        - -30.0
+        - -5.0
+        - -5.0
+        - -5.0
     vz:
-      high: 10.0
-      low: -10.0
+      high: 5.0
+      low: -5.0
   outer_loop: fixed
   plant_config:
     init:
@@ -53,7 +53,7 @@ env_config:
   reset:
     mode: neighbor
     perturb_scale:
-      angles: 1
+      angles_deg: 5
       omega: 1
       pos: 1
       vel: 1
@@ -108,6 +108,7 @@ log_std_min: -5
 n_envs: 5
 num_trans: 10000
 policy_frequency: 2
+s: 1
 seed: 0
 target_network_frequency: 1
 tau: 0.005
