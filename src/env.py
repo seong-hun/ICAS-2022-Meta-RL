@@ -56,7 +56,7 @@ class Multicopter(fym.BaseEnv):
             [-d / b, d / b, -d / b, d / b],
         ]
     )
-    Lambda = np.eye(4)
+    Lambda = None
 
     def __init__(self, plant_config):
         super().__init__()
@@ -412,27 +412,25 @@ class QuadEnv(fym.BaseEnv, gym.Env):
 
         # -- FOR RL
         # observation: vz (1), eta (2), omega (3) -- TOTAL: 6
-        self.observation_space = spaces.Box(
-            low=np.float32(
-                np.hstack(
-                    [
-                        env_config["observation_space"]["vz"]["low"],
-                        env_config["observation_space"]["eta"]["low"],
-                        env_config["observation_space"]["omega"]["low"],
-                    ]
-                )
-            ),
-            high=np.float32(
-                np.hstack(
-                    [
-                        env_config["observation_space"]["vz"]["high"],
-                        env_config["observation_space"]["eta"]["high"],
-                        env_config["observation_space"]["omega"]["high"],
-                    ]
-                )
-            ),
-            dtype=np.float32,
+        get_limits = lambda end, scale: np.float32(
+            np.hstack(
+                [
+                    env_config["observation_space"][k][end]
+                    for k in ["vz", "eta", "omega"]
+                ]
+            )
+            * scale
         )
+        self.observation_space = spaces.Box(
+            low=get_limits("low", env_config["observation_scale"]["bound"]),
+            high=get_limits("high", env_config["observation_scale"]["bound"]),
+        )
+
+        self.initial_space = spaces.Box(
+            low=get_limits("low", env_config["observation_scale"]["init"]),
+            high=get_limits("high", env_config["observation_scale"]["init"]),
+        )
+
         # action: rotorfs (4)
         self.action_space = spaces.Box(
             low=0,
@@ -447,60 +445,15 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         # scaling reward for discretization
         self.reward_scale = self.clock.dt
         self.boundsout_reward = env_config["reward"]["boundsout"]
-        self.obs0 = 0
-        self.action0 = 0
+
+        self.obs0 = np.zeros(self.observation_space.shape, dtype=np.float32)
+        self.action0 = np.zeros(self.action_space.shape, dtype=np.float32)
 
         # -- TEST ENV
-        self.reset_mode = env_config["reset"]["mode"]
-        self.pscale = env_config["reset"]["perturb_scale"]
+        self.reset_mode = env_config["reset_mode"]
 
         # NHS
         self.NHS = {}
-
-    def reset(self):
-        """Reset the plant states.
-
-        Parameters
-        ----------
-        mode : {"random", "neighbor", "initial"}
-        """
-        super().reset()
-
-        if self.reset_mode == "neighbor":
-            angles = Rotation.from_matrix(self.plant.R.state).as_euler("ZYX")
-            angles = np.random.uniform(
-                low=angles - np.deg2rad(self.pscale["angles_deg"]),
-                high=angles + np.deg2rad(self.pscale["angles_deg"]),
-            )
-            self.plant.pos.state = np.random.uniform(
-                low=self.plant.pos.state - self.pscale["pos"],
-                high=self.plant.pos.state + self.pscale["pos"],
-            )
-            self.plant.vel.state = np.random.uniform(
-                low=self.plant.vel.state - self.pscale["vel"],
-                high=self.plant.vel.state + self.pscale["vel"],
-            )
-            self.plant.R.state = Rotation.from_euler("ZYX", angles).as_matrix()
-            self.plant.omega.state = np.random.uniform(
-                low=self.plant.omega.state - self.pscale["omega"],
-                high=self.plant.omega.state + self.pscale["omega"],
-            )
-        # elif self.reset_mode == "random":
-        #     obs = np.float64(self.observation_space.sample())
-        #     pos, vel, R, omega = self.obs2state(obs)
-        #     self.plant.pos.state = pos
-        #     self.plant.vel.state = vel
-        #     self.plant.R.state = R
-        #     self.plant.omega.state = omega
-        elif self.reset_mode == "initial":
-            pass
-        else:
-            raise ValueError
-
-        obs = self.observation()
-        assert self.contains(obs), breakpoint()
-
-        return obs
 
     def step(self, action):
         # -- BEFORE UPDATE
@@ -528,17 +481,37 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         info = {}
         return next_obs, reward, done, info
 
+    def reset(self):
+        """Reset the plant states.
+
+        Parameters
+        ----------
+        mode : {"neighbor", "initial"}
+        """
+        super().reset()
+
+        if self.reset_mode == "neighbor":
+            obs = self.obs0 + self.initial_space.sample()
+            pos, vel, R, omega = self.obs2state(obs)
+            self.plant.pos.state = pos
+            self.plant.vel.state = vel
+            self.plant.R.state = R
+            self.plant.omega.state = omega
+        elif self.reset_mode == "initial":
+            pass
+        else:
+            raise ValueError
+
+        obs = self.observation()
+        assert self.contains(obs), breakpoint()
+
+        return obs
+
     def contains(self, obs):
-        if 1 - (etasq := sum(obs[1:3] ** 2)) < 0:
+        # General bound of attitude
+        if 1 - sum(obs[1:3] ** 2) < 0:
             return False
-        bi = [0, 3, 4, 5]  # box indices
-        contains = (
-            obs.shape == self.observation_space.shape
-            and np.all((obs - self.obs0)[bi] > self.observation_space.low[bi])
-            and np.all((obs - self.obs0)[bi] < self.observation_space.high[bi])
-            and np.arccos(np.sqrt(etasq) / 1) > np.deg2rad(15)
-        )
-        return contains
+        return self.observation_space.contains(obs - self.obs0)
 
     def set_dot(self, t, action):
         # make a 2d vector from an 1d array
@@ -585,7 +558,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
 
         # scaling
         reward *= self.reward_scale
-        return np.float32(reward)
+        return np.float32(reward).item()
 
     def eta2R(self, eta):
         n3 = np.vstack((eta, -np.sqrt(1 - (eta**2).sum())))
@@ -616,8 +589,8 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         assert self.NHS == {}
         self.NHS = NHS
 
-        self.obs0 = NHS["obs"]
-        self.action0 = NHS["action"]
+        self.obs0 = np.float32(NHS["obs"])
+        self.action0 = np.float32(NHS["action"])
 
         self.plant.R.initial_state = NHS["R"]
         self.plant.omega.initial_state = NHS["omega"]

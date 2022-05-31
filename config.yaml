@@ -1,10 +1,13 @@
 alpha: 0.2
 batch_size: 256
-buffer_size: 1000000
+buffer_size: 50000
 env_config:
   fkw:
     dt: 0.02
     max_t: 6
+  observation_scale:
+    bound: 1.0
+    init: 0.05
   observation_space:
     eta:
       high:
@@ -15,16 +18,16 @@ env_config:
         - -0.7
     omega:
       high:
-        - 5.0
-        - 5.0
-        - 5.0
+        - 30.0
+        - 30.0
+        - 30.0
       low:
-        - -5.0
-        - -5.0
-        - -5.0
+        - -30.0
+        - -30.0
+        - -30.0
     vz:
-      high: 5.0
-      low: -5.0
+      high: 20.0
+      low: -20.0
   outer_loop: fixed
   plant_config:
     init:
@@ -50,13 +53,7 @@ env_config:
     - 0.0
     - 0.0
     - -5.0
-  reset:
-    mode: neighbor
-    perturb_scale:
-      angles_deg: 5
-      omega: 1
-      pos: 1
-      vel: 1
+  reset_mode: neighbor
   reward:
     Q:
       - 1
@@ -87,8 +84,8 @@ env_config:
       - 1.0
 exp:
   LoE: 0.0
-  hover: origin
-  policy: SAC
+  hover: near
+  policy: LQL
   task:
     fi: 3
     random: false
@@ -99,17 +96,16 @@ exp:
       - 1.0
 expdir: exp
 hyperparameters:
-  mgamma: 0.0156
-  policy_lr: 0.000222
-  q_lr: 0.00146
+  mgamma: 0.05
+  policy_lr: 0.002
+  q_lr: 0.0015
 learning_starts: 5000
 log_std_max: 2
 log_std_min: -5
 n_envs: 5
-num_trans: 10000
 policy_frequency: 2
 s: 1
 seed: 0
 target_network_frequency: 1
 tau: 0.005
-total_timesteps: 500000
+total_timesteps: 150000

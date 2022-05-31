@@ -7,25 +7,11 @@ import torch.optim as optim
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class LinearModule(nn.Module):
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.model = nn.Linear(in_features, out_features, bias=False)
-
-    def forward(self, input):
-        out = self.model(input)
-        return out
-
-
 class Actor(nn.Module):
     def __init__(self, env, config):
         super().__init__()
         self.K = nn.Linear(
             np.prod(env.observation_space.shape), np.prod(env.action_space.shape)
-        )
-        self.fc_logstd = nn.Sequential(
-            nn.Linear(np.prod(env.observation_space.shape), 32),
-            nn.Linear(32, np.prod(env.action_space.shape)),
         )
 
         self.action_scale = torch.FloatTensor(
@@ -39,22 +25,12 @@ class Actor(nn.Module):
         self.log_std_max = config["log_std_max"]
 
     def forward(self, x):
-        mean = self.K(x)
-        log_std = self.fc_logstd(x)
-        log_std = torch.tanh(log_std)
-        log_std = self.log_std_min + 0.5 * (self.log_std_max - self.log_std_min) * (
-            log_std + 1
-        )
-        std = log_std.exp()
-        normal = torch.distributions.Normal(mean, std)
-        x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
+        mean = -self.K(x)
+        normal = torch.distributions.Normal(mean, 5)
+        x_t = normal.sample()  # for reparameterization trick (mean + std * N(0,1))
         y_t = torch.tanh(x_t)
         action = y_t * self.action_scale + self.action_bias
-        log_prob = normal.log_prob(x_t)
-        # Enforcing Action Bound
-        log_prob -= torch.log(self.action_scale * (1 - y_t.pow(2)) + 1e-6)
-        log_prob = log_prob.sum(1, keepdim=True)
-        return action, log_prob, mean
+        return action, None, mean
 
 
 class Critic(nn.Module):
@@ -86,7 +62,6 @@ class LQL(nn.Module):
         )
 
         self.config = config
-        self.learn_count = 0
 
         self.dt = config["env_config"]["fkw"]["dt"]
         self.s = config["s"]
@@ -94,27 +69,30 @@ class LQL(nn.Module):
         self.R = torch.Tensor(np.diag(config["env_config"]["reward"]["R"])).to(device)
         self.x_dim = np.prod(envs.observation_space.shape)
 
+        self.obs0 = envs.get_attr("obs0")[0]
+        self.action0 = envs.get_attr("action0")[0]
+
     def get_action(self, obs, deterministic=False):
         assert isinstance(obs, np.ndarray)
         if obs.ndim == 1:
-            action, _, mean = self.actor(torch.Tensor(obs).to(device)[None])
+            action, _, mean = self.actor(torch.Tensor(obs - self.obs0).to(device)[None])
             action = action.detach().cpu().numpy()[0]
             mean = mean.detach().cpu().numpy()[0]
         elif obs.ndim == 2:
-            action, _, mean = self.actor(torch.Tensor(obs).to(device))
+            action, _, mean = self.actor(torch.Tensor(obs - self.obs0).to(device))
             action = action.detach().cpu().numpy()
             mean = mean.detach().cpu().numpy()
         else:
             raise ValueError
 
         if deterministic:
-            return mean
+            return mean + self.action0
         else:
-            return action
+            return action + self.action0
 
     def learn(self, data):
-        dx = data.observations
-        du = data.actions
+        dx = data.observations - torch.Tensor(self.obs0).to(device)
+        du = data.actions - torch.Tensor(self.action0).to(device)
         xdot = (data.next_observations - data.observations) / self.dt
 
         # -- UPDATE CRITIC
@@ -157,11 +135,9 @@ class LQL(nn.Module):
         actor_loss.backward()
         self.actor_optimizer.step()
 
-        self.learn_count += 1
-
         # write to writer
         logs = {
-            "losses/q_loss": q_loss.item(),
+            "losses/qf_loss": q_loss.item(),
             "losses/actor_loss": actor_loss.item(),
         }
 
