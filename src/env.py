@@ -96,7 +96,7 @@ class Multicopter(fym.BaseEnv):
         rotorfs = np.clip(rotorfs_cmd, self.rotorf_min, self.rotorf_max)
         return self.Lambda @ rotorfs
 
-    def get_task(self, random=True, **kwargs):
+    def get_task(self, random=False, **kwargs):
         # default task
         task = {
             "rf": np.ones(4),  # rotor faults (0: complete failure, 1: healthy)
@@ -410,9 +410,11 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         elif env_config["outer_loop"] == "fixed":
             self.outer = FixedOuterLoop(self)
 
+        self.dtype = np.float64
+
         # -- FOR RL
         # observation: vz (1), eta (2), omega (3) -- TOTAL: 6
-        get_limits = lambda end, scale: np.float32(
+        get_limits = lambda end, scale: self.dtype(
             np.hstack(
                 [
                     env_config["observation_space"][k][end]
@@ -424,30 +426,31 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         self.observation_space = spaces.Box(
             low=get_limits("low", env_config["observation_scale"]["bound"]),
             high=get_limits("high", env_config["observation_scale"]["bound"]),
+            dtype=self.dtype,
         )
 
         self.initial_space = spaces.Box(
             low=get_limits("low", env_config["observation_scale"]["init"]),
             high=get_limits("high", env_config["observation_scale"]["init"]),
+            dtype=self.dtype,
         )
 
         # action: rotorfs (4)
         self.action_space = spaces.Box(
-            low=0,
-            high=self.plant.rotorf_max,
-            shape=(4,),
-            dtype=np.float32,
+            low=0, high=self.plant.rotorf_max, shape=(4,), dtype=self.dtype
         )
 
         # reward (- LQR cost)
-        self.LQR_Q = np.diag(env_config["reward"]["Q"])
-        self.LQR_R = np.diag(env_config["reward"]["R"])
+        self.LQR_Q = self.dtype(np.diag(env_config["reward"]["Q"]))
+        self.LQR_R = self.dtype(np.diag(env_config["reward"]["R"]))
         # scaling reward for discretization
-        self.reward_scale = self.clock.dt
+        self.reward_scale = self.dtype(self.clock.dt)
         self.boundsout_reward = env_config["reward"]["boundsout"]
+        if self.boundsout_reward is not None:
+            self.boundsout_reward = self.dtype(self.boundsout_reward)
 
-        self.obs0 = np.zeros(self.observation_space.shape, dtype=np.float32)
-        self.action0 = np.zeros(self.action_space.shape, dtype=np.float32)
+        self.obs0 = np.zeros(self.observation_space.shape or 6, dtype=self.dtype)
+        self.action0 = np.zeros(self.action_space.shape or 4, dtype=self.dtype)
 
         # -- TEST ENV
         self.reset_mode = env_config["reset_mode"]
@@ -540,8 +543,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         obs = np.hstack((vz, eta, omega))
 
         # set dtype for RL policies
-        dtype = dtype or np.float32
-        return dtype(obs)
+        return self.dtype(obs)
 
     def get_reward(self, obs, action):
         obs = (obs - self.obs0)[:, None]
@@ -558,7 +560,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
 
         # scaling
         reward *= self.reward_scale
-        return np.float32(reward).item()
+        return reward.item()
 
     def eta2R(self, eta):
         n3 = np.vstack((eta, -np.sqrt(1 - (eta**2).sum())))
@@ -589,8 +591,8 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         assert self.NHS == {}
         self.NHS = NHS
 
-        self.obs0 = np.float32(NHS["obs"])
-        self.action0 = np.float32(NHS["action"])
+        self.obs0 = self.dtype(NHS["obs"])
+        self.action0 = self.dtype(NHS["action"])
 
         self.plant.R.initial_state = NHS["R"]
         self.plant.omega.initial_state = NHS["omega"]

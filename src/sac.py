@@ -8,7 +8,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class Actor(nn.Module):
-    def __init__(self, env, config):
+    def __init__(self, env, policy_config):
         super().__init__()
         self.fc1 = nn.Linear(np.prod(env.observation_space.shape), 256)
         self.fc2 = nn.Linear(256, 256)
@@ -23,8 +23,8 @@ class Actor(nn.Module):
             (env.action_space.high + env.action_space.low) / 2.0
         )
 
-        self.log_std_min = config["log_std_min"]
-        self.log_std_max = config["log_std_max"]
+        self.log_std_min = policy_config["log_std_min"]
+        self.log_std_max = policy_config["log_std_max"]
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -75,7 +75,16 @@ class SoftQNetwork(nn.Module):
 class SAC(nn.Module):
     def __init__(self, envs, config):
         super().__init__()
-        self.actor = Actor(envs, config)
+
+        policy_config = config["policy_config"]["SAC"]
+
+        if policy_config["dtype"] == "float32":
+            self.dtype = torch.float32
+        elif policy_config["dtype"] == "float64":
+            self.dtype = torch.float64
+        torch.set_default_dtype(self.dtype)
+
+        self.actor = Actor(envs, policy_config)
 
         # setup networks
         self.qf1 = SoftQNetwork(envs)
@@ -89,22 +98,22 @@ class SAC(nn.Module):
         # setup optimizers
         self.q_optimizer = optim.Adam(
             list(self.qf1.parameters()) + list(self.qf2.parameters()),
-            lr=config["hyperparameters"]["q_lr"],
+            lr=policy_config["q_lr"],
         )
         self.actor_optimizer = optim.Adam(
             list(self.actor.parameters()),
-            lr=config["hyperparameters"]["policy_lr"],
+            lr=policy_config["policy_lr"],
         )
 
         # with autotune = True
         self.target_entropy = -torch.prod(torch.Tensor(envs.action_space.shape)).item()
         self.log_alpha = torch.zeros(1, requires_grad=True)
         self.alpha = self.log_alpha.exp().item()
-        self.a_optimizer = optim.Adam(
-            [self.log_alpha], lr=config["hyperparameters"]["q_lr"]
-        )
+        self.a_optimizer = optim.Adam([self.log_alpha], lr=policy_config["q_lr"])
 
-        self.config = config
+        self.boundsout = config["env_config"]["reward"]["boundsout"]
+
+        self.policy_config = policy_config
         self.learn_count = 0
 
     def get_action(self, obs, deterministic=False):
@@ -126,25 +135,23 @@ class SAC(nn.Module):
             return action
 
     def learn(self, data):
-        config = self.config
+        policy_config = self.policy_config
 
-        gamma = 1 - config["hyperparameters"]["mgamma"]
+        observations = data.observations.to(self.dtype)
+        actions = data.actions.to(self.dtype)
+        next_observations = data.next_observations.to(self.dtype)
+
+        gamma = 1 - policy_config["mgamma"]
 
         with torch.no_grad():
-            next_state_actions, next_state_log_pi, _ = self.actor(
-                data.next_observations
-            )
-            qf1_next_target = self.qf1_target(
-                data.next_observations, next_state_actions
-            )
-            qf2_next_target = self.qf2_target(
-                data.next_observations, next_state_actions
-            )
+            next_state_actions, next_state_log_pi, _ = self.actor(next_observations)
+            qf1_next_target = self.qf1_target(next_observations, next_state_actions)
+            qf2_next_target = self.qf2_target(next_observations, next_state_actions)
             min_qf_next_target = (
                 torch.min(qf1_next_target, qf2_next_target)
                 - self.alpha * next_state_log_pi
             )
-            if config["env_config"]["reward"]["boundsout"] is None:
+            if self.boundsout is None:
                 next_q_value = data.rewards.flatten() + gamma * (
                     min_qf_next_target
                 ).view(-1)
@@ -153,8 +160,8 @@ class SAC(nn.Module):
                     1 - data.dones.flatten()
                 ) * (min_qf_next_target).view(-1)
 
-        qf1_a_values = self.qf1(data.observations, data.actions).view(-1)
-        qf2_a_values = self.qf2(data.observations, data.actions).view(-1)
+        qf1_a_values = self.qf1(observations, actions).view(-1)
+        qf2_a_values = self.qf2(observations, actions).view(-1)
         qf1_loss = F.mse_loss(qf1_a_values, next_q_value)
         qf2_loss = F.mse_loss(qf2_a_values, next_q_value)
         qf_loss = qf1_loss + qf2_loss
@@ -164,14 +171,14 @@ class SAC(nn.Module):
         self.q_optimizer.step()
 
         if (
-            self.learn_count % config["policy_frequency"] == 0
+            self.learn_count % policy_config["policy_frequency"] == 0
         ):  # TD 3 Delayed update support
             for _ in range(
-                config["policy_frequency"]
+                policy_config["policy_frequency"]
             ):  # compensate for the delay by doing 'actor_update_interval' instead of 1
-                pi, log_pi, _ = self.actor(data.observations)
-                qf1_pi = self.qf1(data.observations, pi)
-                qf2_pi = self.qf2(data.observations, pi)
+                pi, log_pi, _ = self.actor(observations)
+                qf1_pi = self.qf1(observations, pi)
+                qf2_pi = self.qf2(observations, pi)
                 min_qf_pi = torch.min(qf1_pi, qf2_pi).view(-1)
                 self.actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
@@ -181,7 +188,7 @@ class SAC(nn.Module):
 
                 # with autotune = True
                 with torch.no_grad():
-                    _, log_pi, _ = self.actor(data.observations)
+                    _, log_pi, _ = self.actor(observations)
                 self.alpha_loss = (
                     -self.log_alpha * (log_pi + self.target_entropy)
                 ).mean()
@@ -192,18 +199,20 @@ class SAC(nn.Module):
                 self.alpha = self.log_alpha.exp().item()
 
         # update the target networks
-        if self.learn_count % config["target_network_frequency"] == 0:
+        if self.learn_count % policy_config["target_network_frequency"] == 0:
             for param, target_param in zip(
                 self.qf1.parameters(), self.qf1_target.parameters()
             ):
                 target_param.data.copy_(
-                    config["tau"] * param.data + (1 - config["tau"]) * target_param.data
+                    policy_config["tau"] * param.data
+                    + (1 - policy_config["tau"]) * target_param.data
                 )
             for param, target_param in zip(
                 self.qf2.parameters(), self.qf2_target.parameters()
             ):
                 target_param.data.copy_(
-                    config["tau"] * param.data + (1 - config["tau"]) * target_param.data
+                    policy_config["tau"] * param.data
+                    + (1 - policy_config["tau"]) * target_param.data
                 )
 
         self.learn_count += 1

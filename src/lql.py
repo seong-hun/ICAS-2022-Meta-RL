@@ -8,7 +8,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class Actor(nn.Module):
-    def __init__(self, env, config):
+    def __init__(self, env, policy_config):
         super().__init__()
         self.K = nn.Linear(
             np.prod(env.observation_space.shape), np.prod(env.action_space.shape)
@@ -21,12 +21,11 @@ class Actor(nn.Module):
             (env.action_space.high + env.action_space.low) / 2.0
         )
 
-        self.log_std_min = config["log_std_min"]
-        self.log_std_max = config["log_std_max"]
+        self.std = policy_config["behavior_std"]
 
     def forward(self, x):
         mean = -self.K(x)
-        normal = torch.distributions.Normal(mean, 5)
+        normal = torch.distributions.Normal(mean, self.std)
         x_t = normal.sample()  # for reparameterization trick (mean + std * N(0,1))
         y_t = torch.tanh(x_t)
         action = y_t * self.action_scale + self.action_bias
@@ -49,24 +48,31 @@ class Critic(nn.Module):
 class LQL(nn.Module):
     def __init__(self, envs, config):
         super().__init__()
-        self.actor = Actor(envs, config)
+
+        policy_config = config["policy_config"]["LQL"]
+
+        if policy_config["dtype"] == "float32":
+            self.dtype = torch.float32
+        elif policy_config["dtype"] == "float64":
+            self.dtype = torch.float64
+        torch.set_default_dtype(self.dtype)
+
+        self.actor = Actor(envs, policy_config)
         self.critic = Critic(envs)
 
         self.q_optimizer = optim.Adam(
             self.critic.parameters(),
-            lr=config["hyperparameters"]["q_lr"],
+            lr=policy_config["q_lr"],
         )
         self.actor_optimizer = optim.Adam(
             self.actor.parameters(),
-            lr=config["hyperparameters"]["policy_lr"],
+            lr=policy_config["policy_lr"],
         )
 
-        self.config = config
-
         self.dt = config["env_config"]["fkw"]["dt"]
-        self.s = config["s"]
-        self.Q = torch.Tensor(np.diag(config["env_config"]["reward"]["Q"])).to(device)
-        self.R = torch.Tensor(np.diag(config["env_config"]["reward"]["R"])).to(device)
+        self.s = policy_config["s"]
+        self.Q = torch.tensor(np.diag(config["env_config"]["reward"]["Q"])).to(device)
+        self.R = torch.tensor(np.diag(config["env_config"]["reward"]["R"])).to(device)
         self.x_dim = np.prod(envs.observation_space.shape)
 
         self.obs0 = envs.get_attr("obs0")[0]
@@ -75,11 +81,11 @@ class LQL(nn.Module):
     def get_action(self, obs, deterministic=False):
         assert isinstance(obs, np.ndarray)
         if obs.ndim == 1:
-            action, _, mean = self.actor(torch.Tensor(obs - self.obs0).to(device)[None])
+            action, _, mean = self.actor(torch.tensor(obs - self.obs0).to(device)[None])
             action = action.detach().cpu().numpy()[0]
             mean = mean.detach().cpu().numpy()[0]
         elif obs.ndim == 2:
-            action, _, mean = self.actor(torch.Tensor(obs - self.obs0).to(device))
+            action, _, mean = self.actor(torch.tensor(obs - self.obs0).to(device))
             action = action.detach().cpu().numpy()
             mean = mean.detach().cpu().numpy()
         else:
@@ -91,8 +97,8 @@ class LQL(nn.Module):
             return action + self.action0
 
     def learn(self, data):
-        dx = data.observations - torch.Tensor(self.obs0).to(device)
-        du = data.actions - torch.Tensor(self.action0).to(device)
+        dx = data.observations - self.obs0
+        du = data.actions - self.action0
         xdot = (data.next_observations - data.observations) / self.dt
 
         # -- UPDATE CRITIC

@@ -26,6 +26,7 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from src.env import QuadEnv
 from src.lql import LQL
 from src.sac import SAC
+from src.metarl import MetaRL
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -36,12 +37,15 @@ with open("config.yaml", "r") as f:
 def make_env(config):
     # setup the task and update config
     env_config = config["env_config"]
-    task = config["exp"]["task"]
-    task["rf"][task["fi"]] = 1 - config["exp"]["LoE"]
+
+    # make a task
+    rf = np.ones(4)
+    rf[config["exp"]["fi"]] = 1 - config["exp"]["LoE"]
+    assert np.all((0 <= rf) & (rf <= 1))
 
     # make env
     env = QuadEnv(env_config)
-    task = env.plant.get_task(**task)
+    task = env.plant.get_task(rf=rf)
     env.plant.set_task(task)
 
     if config["exp"]["hover"] == "near":
@@ -102,144 +106,6 @@ def setup(*user_configs):
     return config
 
 
-def trainable(config: dict, idx: int = 0):
-    """Functional trainable method"""
-
-    # seeding
-    seed = config["seed"]
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    # make a taskdir
-    equilibrium = config["exp"]["hover"]
-    LoE = config["exp"]["LoE"]
-    taskdir = Path(config["expdir"], f"{equilibrium}-hover/LoE-{int(LoE*100):02d}")
-
-    # make a trial dir
-    trialdir = taskdir / config["exp"]["policy"] / f"trial-{idx:0{len(str(idx))+1}d}"
-    logger.info(f"Trial: {trialdir}")
-
-    # make vectorized multiple envs for averaging the results
-    envs = DummyVecEnv([make_env_fn(config) for _ in range(config["n_envs"])])
-
-    # setup policy
-    if config["exp"]["policy"] == "SAC":
-        policy = SAC(envs, config)
-    elif config["exp"]["policy"] == "LQL":
-        policy = LQL(envs, config)
-    else:
-        raise ValueError
-
-    policy.to(device)
-    policy.train()
-
-    rb = ReplayBuffer(
-        buffer_size=int(config["buffer_size"]),
-        observation_space=envs.observation_space,
-        action_space=envs.action_space,
-        device=device,
-        n_envs=config["n_envs"],
-        handle_timeout_termination=True,
-    )
-
-    # start the game
-    start_time = time.time()
-    start = 0
-    obs = envs.reset()
-
-    for global_step in range(start, int(config["total_timesteps"])):
-        # ALGO LOGIC: put action logic here
-        if global_step < config["learning_starts"]:
-            actions = np.array(
-                [envs.action_space.sample() for _ in range(envs.num_envs)]
-            )
-        else:
-            actions = policy.get_action(obs)
-
-        # TRY NOT TO MODIFY: execute the game and log data.
-        next_obs, rewards, dones, infos = envs.step(actions)
-
-        # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
-        real_next_obs = next_obs.copy()
-        for idx, d in enumerate(dones):
-            if d:
-                real_next_obs[idx] = infos[idx]["terminal_observation"]
-        rb.add(obs, real_next_obs, actions, rewards, dones, infos)
-
-        # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
-        obs = next_obs
-
-        # ALGO LOGIC: training.
-        if global_step > config["learning_starts"]:
-            data = rb.sample(int(config["batch_size"]))
-
-            # train the policy (policy.train is reserved)
-            train_logs = policy.learn(data)
-
-            # lazy define writer
-            if not trialdir.exists():
-                # save the current config
-                writer = SummaryWriter(trialdir)
-                writer.add_text(
-                    "hyperparameters",
-                    "|param|value|\n|-|-|\n%s"
-                    % (
-                        "\n".join([f"|{key}|{value}|" for key, value in config.items()])
-                    ),
-                )
-
-            # lazy create the trial dir
-            if not (configpath := trialdir / "config.yaml").exists():
-                trialdir.mkdir(parents=True, exist_ok=True)
-
-                with open(configpath, "w") as f:
-                    yaml.dump(config, f, Dumper=yaml.SafeDumper)
-
-            # lazy define flogger
-            if not (historydir := trialdir / "train-history.h5").exists():
-                flogger = fym.Logger(historydir, max_len=1)
-
-            # logging scalars to tensorboard
-            if global_step % 100 == 0:
-                for k, v in train_logs.items():
-                    writer.add_scalar(k, v, global_step)
-
-                logger.info(f"SPS: {int(global_step / (time.time() - start_time))}")
-                writer.add_scalar(
-                    "charts/SPS",
-                    int(global_step / (time.time() - start_time)),
-                    global_step,
-                )
-
-            # Evaluation
-            if global_step % 1000 == 0:
-                eval_logs = evaluate(policy, config)
-
-                for k, v in eval_logs.items():
-                    writer.add_scalar(k, v, global_step)
-
-                flogger.record(global_step=global_step, **eval_logs | train_logs)
-                logger.info(f"SPS: {int(global_step / (time.time() - start_time))}")
-
-            # Save the model into a checkpoint
-            if global_step % (config["total_timesteps"] // 20) == 0:
-                policy.eval()
-
-                ndigit = len(str(int(config["total_timesteps"]))) + 1
-                path = trialdir / f"checkpoint-{global_step:0{ndigit}d}"
-                torch.save(
-                    {"policy": policy.state_dict(), "global_step": global_step},
-                    path,
-                )
-
-                policy.train()
-
-    envs.close()
-    writer.close()
-    flogger.close()
-
-
 def evaluate(policy, config):
     policy.eval()
 
@@ -278,6 +144,140 @@ def evaluate(policy, config):
     return logs
 
 
+def trainable(config: dict, idx: int = 0):
+    """Functional trainable method"""
+
+    # seeding
+    seed = config["train"]["seed"]
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    # make a taskdir
+    equilibrium = config["exp"]["hover"]
+    LoE = config["exp"]["LoE"]
+    taskdir = Path(config["exp"]["dir"], f"{equilibrium}-hover/LoE-{int(LoE*100):02d}")
+
+    # make a trial dir
+    trialdir = taskdir / config["exp"]["policy"] / f"trial-{idx:0{len(str(idx))+1}d}"
+    logger.info(f"Trial: {trialdir}")
+
+    # make vectorized multiple envs for averaging the results
+    envs = DummyVecEnv([make_env_fn(config) for _ in range(config["train"]["n_envs"])])
+
+    # setup policy
+    if config["exp"]["policy"] == "SAC":
+        policy = SAC(envs, config)
+    elif config["exp"]["policy"] == "LQL":
+        policy = LQL(envs, config)
+    elif config["exp"]["policy"] == "MetaRL":
+        policy = MetaRL(envs, config)
+    else:
+        raise ValueError
+
+    policy.to(device)
+    policy.train()
+
+    rb = ReplayBuffer(
+        buffer_size=int(config["train"]["buffer_size"]),
+        observation_space=envs.observation_space,
+        action_space=envs.action_space,
+        device=device,
+        n_envs=config["train"]["n_envs"],
+        handle_timeout_termination=True,
+    )
+
+    # start the game
+    start_time = time.time()
+    start = 0
+    obs = envs.reset()
+
+    for global_step in range(start, int(config["train"]["total_timesteps"])):
+        # ALGO LOGIC: put action logic here
+        if global_step < config["train"]["learning_starts"]:
+            actions = np.array(
+                [envs.action_space.sample() for _ in range(envs.num_envs)]
+            )
+        else:
+            actions = policy.get_action(obs)
+
+        # TRY NOT TO MODIFY: execute the game and log data.
+        next_obs, rewards, dones, infos = envs.step(actions)
+
+        # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
+        real_next_obs = next_obs.copy()
+        for idx, d in enumerate(dones):
+            if d:
+                real_next_obs[idx] = infos[idx]["terminal_observation"]
+        rb.add(obs, real_next_obs, actions, rewards, dones, infos)
+
+        # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
+        obs = next_obs
+
+        # ALGO LOGIC: training.
+        if global_step > config["train"]["learning_starts"]:
+            data = rb.sample(int(config["train"]["batch_size"]))
+
+            # train the policy (policy.train is reserved)
+            train_logs = policy.learn(data)
+
+            # lazy define writer
+            if not trialdir.exists():
+                # save the current config
+                writer = SummaryWriter(trialdir)
+                writer.add_text(
+                    "hyperparameters",
+                    "|param|value|\n|-|-|\n%s"
+                    % (
+                        "\n".join([f"|{key}|{value}|" for key, value in config.items()])
+                    ),
+                )
+
+            # lazy create the trial dir
+            if not (configpath := trialdir / "config.yaml").exists():
+                trialdir.mkdir(parents=True, exist_ok=True)
+
+                with open(configpath, "w") as f:
+                    yaml.dump(config, f, Dumper=yaml.SafeDumper)
+
+            # lazy define flogger
+            if not (historydir := trialdir / "train-history.h5").exists():
+                flogger = fym.Logger(historydir, max_len=1)
+
+            # logging scalars to tensorboard
+            if global_step % 100 == 0:
+                for k, v in train_logs.items():
+                    writer.add_scalar(k, v, global_step)
+
+                SPS = int(global_step / (time.time() - start_time))
+                logger.info(f"[{global_step}] SPS: {SPS}")
+                writer.add_scalar("charts/SPS", SPS, global_step)
+
+            # Evaluation
+            if global_step % 1000 == 0:
+                eval_logs = evaluate(policy, config)
+                for k, v in eval_logs.items():
+                    writer.add_scalar(k, v, global_step)
+                flogger.record(global_step=global_step, **eval_logs | train_logs)
+
+            # Save the model into a checkpoint
+            if global_step % (config["train"]["total_timesteps"] // 20) == 0:
+                policy.eval()
+
+                ndigit = len(str(int(config["train"]["total_timesteps"]))) + 1
+                path = trialdir / f"checkpoint-{global_step:0{ndigit}d}"
+                torch.save(
+                    {"policy": policy.state_dict(), "global_step": global_step},
+                    path,
+                )
+
+                policy.train()
+
+    envs.close()
+    writer.close()
+    flogger.close()
+
+
 def train_exp1(expdir=None, with_ray=False):
     expdir = expdir or f"exp/exp1_{datetime.now().isoformat(timespec='seconds')}"
 
@@ -290,11 +290,25 @@ def train_exp1(expdir=None, with_ray=False):
             },
             "env_config": {
                 "observation_scale": {
-                    "bound": 0.2,
-                    "init": 0.15,
+                    "bound": 0.15,
+                    "init": 0.1,
                 },
             },
-            "seed": tune.randint(0, 100000),
+            "train": {
+                "seed": tune.randint(0, 100000),
+            },
+        },
+        {
+            "exp": {"hover": "near", "LoE": 1.0, "policy": "LQL"},
+            "env_config": {
+                "observation_scale": {
+                    "bound": 0.15,
+                    "init": 0.1,
+                },
+            },
+            "train": {
+                "seed": tune.randint(0, 100000),
+            },
         },
         # {
         #     "exp": {
@@ -304,13 +318,6 @@ def train_exp1(expdir=None, with_ray=False):
         #     },
         #     "env_config": {
         #         "observation_scale": {"bound": 1.0},
-        #     },
-        #     "seed": tune.randint(0, 100000),
-        # },
-        # {
-        #     "exp": {"hover": "near", "LoE": 1.0, "policy": "LQL"},
-        #     "env_config": {
-        #         "observation_scale": {"bound": 0.1},
         #     },
         #     "seed": tune.randint(0, 100000),
         # },
@@ -334,7 +341,7 @@ def train_exp1(expdir=None, with_ray=False):
         return
 
     train_config = {
-        "expdir": expdir,
+        "exp": {"dir": expdir},
     }
 
     if not with_ray:
@@ -379,8 +386,9 @@ def plot_trials(ax, trialdir):
             pd.DataFrame(
                 {
                     k: (
-                        np.ravel(v["charts"]["episodic_return"])
-                        / np.ravel(v["charts"]["episodic_length"])
+                        # np.ravel(v["charts"]["episodic_return"])
+                        # / np.ravel(v["charts"]["episodic_length"])
+                        np.ravel(v["charts"]["episodic_length"])
                     )
                 },
                 index=v["global_step"],
@@ -389,7 +397,7 @@ def plot_trials(ax, trialdir):
         ],
         axis=1,
     )
-    df = df.loc[:, df.std() < 20]
+    # df = df.loc[:, df.std() < 13]
 
     x = df.index
     mean = df.mean(axis=1)
