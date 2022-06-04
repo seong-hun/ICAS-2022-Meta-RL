@@ -320,9 +320,9 @@ def plot_trials(ax, trialdir):
             pd.DataFrame(
                 {
                     k: (
-                        # np.ravel(v["charts"]["episodic_return"])
-                        # / np.ravel(v["charts"]["episodic_length"])
-                        np.ravel(v["charts"]["episodic_length"])
+                        np.ravel(v["charts"]["episodic_return"])
+                        / np.ravel(v["charts"]["episodic_length"])
+                        # np.ravel(v["charts"]["episodic_length"])
                     )
                 },
                 index=v["global_step"],
@@ -331,7 +331,7 @@ def plot_trials(ax, trialdir):
         ],
         axis=1,
     )
-    # df = df.loc[:, df.std() < 13]
+    df = df.loc[:, df.std() < 10]
 
     x = df.index
     mean = df.mean(axis=1)
@@ -355,13 +355,13 @@ def plot_exp1(expdir=None):
 
     origindir = expdir / "origin-hover"
 
-    fig, axes = plt.subplots(1, 3, figsize=(9, 2.7), sharey=True)
+    fig, axes = plt.subplots(1, 4, figsize=(9, 2.7), sharey=True)
 
     get_LoE = lambda x: int(str(x.name).split("-")[-1])
 
     LoEs = sorted(origindir.iterdir(), key=get_LoE)
 
-    for ax, LoEdir in zip(axes, LoEs):
+    for ax, LoEdir in zip(axes[:3], LoEs):
         for policy in ["LQL", "SAC"]:
             plot_trials(ax, LoEdir / policy)
 
@@ -369,22 +369,18 @@ def plot_exp1(expdir=None):
         ax.xaxis.set_major_formatter(ticker)
         ax.set_xlabel("Number of steps")
         ax.set_title(f"{get_LoE(LoEdir)} \% LoE")
-        # ax.set_ylim(-4, 1)
+        ax.set_ylim(-25, 1)
 
     axes[2].legend(loc="lower right")
     axes[0].set_ylabel("Average return")
 
-    fig.tight_layout()
-
-    # -- Figure 1. Origin-hover
-
     origindir = expdir / "near-hover"
     LoEdir = origindir / "LoE-100"
 
-    fig, ax = plt.subplots(figsize=(3, 2.7))
+    ax = axes[3]
 
     for policy in ["LQL", "SAC"]:
-        plot_trials(ax, LoEdir / policy)
+        plot_trials(axes[3], LoEdir / policy)
 
     ticker = matplotlib.ticker.EngFormatter(unit="")
     ax.xaxis.set_major_formatter(ticker)
