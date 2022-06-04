@@ -14,6 +14,11 @@ def cross(x, y):
     return np.cross(x, y, axis=0)
 
 
+def ncross(x, y):
+    c = cross(x, y)
+    return c / np.linalg.norm(c)
+
+
 class Multicopter(fym.BaseEnv):
     """A Multicopter enviroment with a varying LoE feature.
 
@@ -90,6 +95,15 @@ class Multicopter(fym.BaseEnv):
         dots = self.deriv(*states, rotorfs)
         self.pos.dot, self.vel.dot, self.R.dot, self.omega.dot = dots
         return dict(rotorfs=rotorfs)
+
+    def R2angles(self, deg=False, R=None):
+        if R is None:
+            R = self.R.state
+        angles = Rotation.from_matrix(R).as_euler("ZYX")[::-1]
+        if deg:
+            return np.rad2deg(angles)
+        else:
+            return angles
 
     def set_valid(self, t, rotorfs_cmd):
         """Saturate the rotor angular velocities and set faults."""
@@ -567,10 +581,10 @@ class QuadEnv(fym.BaseEnv, gym.Env):
         e3 = np.vstack((0, 0, 1))
 
         RT = np.zeros((3, 3))
-        e3xn3 = cross(e3, n3)
+        e3xn3 = ncross(e3, n3)
         if np.all(np.isclose(e3xn3, 0)):
             e3xn3 = np.vstack((0, 1, 0))
-        RT[:, 0:1] = -cross(e3xn3, n3)
+        RT[:, 0:1] = -ncross(e3xn3, n3)
         RT[:, 1:2] = e3xn3
         RT[:, 2:3] = -n3
 
@@ -610,7 +624,7 @@ class QuadEnv(fym.BaseEnv, gym.Env):
             _, vel_dot, _, omega_dot = plant.deriv(pos, vel, R, omega, rotors)
 
             n3 = np.vstack((eta, -np.sqrt(1 - (eta**2).sum())))
-            n_dot = -np.cross(omega, n3, axis=0)
+            n_dot = -cross(omega, n3)
 
             return np.vstack((vel_dot[2], n_dot[:2], omega_dot))
 
