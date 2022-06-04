@@ -1,9 +1,7 @@
 import argparse
 import random
 import time
-from copy import deepcopy
 from datetime import datetime
-from functools import reduce
 from pathlib import Path
 
 import fym
@@ -23,35 +21,14 @@ from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from src.env import QuadEnv
 from src.lql import LQL
 from src.sac import SAC
-from src.metarl import MetaRL
+from src.utils import make_env, merge
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 with open("config.yaml", "r") as f:
     CONFIG = yaml.load(f, Loader=yaml.SafeLoader)
-
-
-def make_env(config):
-    # setup the task and update config
-    env_config = config["env_config"]
-
-    # make a task
-    rf = np.ones(4)
-    rf[config["exp"]["fi"]] = 1 - config["exp"]["LoE"]
-    assert np.all((0 <= rf) & (rf <= 1))
-
-    # make env
-    env = QuadEnv(env_config)
-    task = env.plant.get_task(rf=rf)
-    env.plant.set_task(task)
-
-    if config["exp"]["hover"] == "near":
-        NHS = env.plant.find_NHS()
-        env.set_NHS(NHS)
-    return env
 
 
 def make_env_fn(config):
@@ -61,49 +38,6 @@ def make_env_fn(config):
         return env
 
     return wrapper
-
-
-def merge(*configs):
-    assert len(configs) > 1
-
-    def _merge(base, new):
-        assert isinstance(base, dict), f"{base} is not a dict"
-        assert isinstance(new, dict), f"{new} is not a dict"
-        out = deepcopy(base)
-        for k, v in new.items():
-            assert k in out, f"{k} not in {base}"
-            if isinstance(v, dict):
-                if "grid_search" in v:
-                    out[k] = v
-                else:
-                    out[k] = _merge(out[k], v)
-            else:
-                out[k] = v
-
-        return out
-
-    return reduce(_merge, configs)
-
-
-def setup(*user_configs):
-    """Get the user-defined config"""
-
-    def update(base, new):
-        assert isinstance(base, dict), f"{base} is not a dict"
-        assert isinstance(new, dict), f"{new} is not a dict"
-        for k, v in new.items():
-            assert k in base, f"{k} not in {base}"
-            if isinstance(v, dict):
-                if "grid_search" in v:
-                    base[k] = v
-                else:
-                    update(base[k], v)
-            else:
-                base[k] = v
-
-    for user_config in user_configs:
-        update(config, user_config)
-    return config
 
 
 def evaluate(policy, config):

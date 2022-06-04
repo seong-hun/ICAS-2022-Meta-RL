@@ -1,18 +1,21 @@
 import argparse
 from pathlib import Path
+from pprint import pprint
 
 import fym
 import matplotlib.pyplot as plt
 import numpy as np
-import ray.tune.trial
+import torch
 import yaml
 from loguru import logger
-from ray.rllib.agents import ppo
 from ray.tune import ExperimentAnalysis
 from scipy.spatial.transform import Rotation
 
-from src import env
 from src.env import QuadEnv
+from src.sac import SAC
+from src.utils import make_env, merge
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 with open("config.yaml", "r") as f:
     CONFIG = yaml.load(f, Loader=yaml.SafeLoader)
