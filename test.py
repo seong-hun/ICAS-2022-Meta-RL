@@ -11,7 +11,7 @@ from loguru import logger
 from ray.tune import ExperimentAnalysis
 from scipy.spatial.transform import Rotation
 
-from src.env import QuadEnv
+from src.lql import LQL
 from src.sac import SAC
 from src.utils import make_env, merge
 
@@ -45,9 +45,6 @@ def test(trialdir):
     with open(trialdir / "config.yaml", "r") as f:
         config = yaml.load(f, Loader=yaml.SafeLoader)
 
-    with open("config.yaml", "r") as f:
-        CONFIG = yaml.load(f, Loader=yaml.SafeLoader)
-
     test_config = {
         "env_config": {
             "fkw": {"max_t": 20, "dt": 0.001},
@@ -57,16 +54,17 @@ def test(trialdir):
                 "init": 0.1,
             },
         },
-        "exp": {
-            "LoE": config["exp"]["LoE"],
-            "fi": config["exp"]["task"]["fi"],
-        },
     }
-    config = merge(CONFIG, test_config)
+    config = merge(config, test_config)
     pprint(config)
     env = make_env(config)
 
-    policy = SAC(env, config)
+    if config["exp"]["policy"] == "SAC":
+        policy = SAC(env, config)
+    elif config["exp"]["policy"] == "LQL":
+        policy = LQL(env, config)
+    else:
+        raise ValueError
     policy.to(device)
     last_checkpoint = sorted(trialdir.glob("checkpoint-*"))[-1]
     model = torch.load(last_checkpoint)
@@ -151,19 +149,6 @@ def plot(trialdir):
     # fig.savefig(testdir / "hist.pdf", bbox_inches="tight")
 
     plt.show()
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-n", "--nid", type=int, default=None)
-    args = parser.parse_args()
-
-    env.register()
-
-    trial = get_trial(nid=args.nid)
-
-    test(trial)
-    plot_test(trial)
 
 
 if __name__ == "__main__":
