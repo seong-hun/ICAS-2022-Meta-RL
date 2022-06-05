@@ -1,6 +1,6 @@
 env_config:
   fkw:
-    dt: 0.02
+    dt: 0.001
     max_t: 6
   observation_scale:
     bound: 1.0

@@ -16,7 +16,6 @@ import torch
 import yaml
 from loguru import logger
 from ray.tune.suggest.variant_generator import generate_variants
-from scipy.spatial.transform import Rotation
 from stable_baselines3.common.buffers import ReplayBuffer
 from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 from torch.utils.tensorboard.writer import SummaryWriter
@@ -96,6 +95,11 @@ def trainable(config: dict, idx: int = 0):
     trialdir = taskdir / config["exp"]["policy"] / f"trial-{idx:0{len(str(idx))+1}d}"
     logger.info(f"Trial: {trialdir}")
 
+    # Lazy saving
+    configdir = None
+    writer = None
+    flogger = None
+
     # make vectorized multiple envs for averaging the results
     envs = DummyVecEnv([make_env_fn(config) for _ in range(config["train"]["n_envs"])])
 
@@ -104,8 +108,6 @@ def trainable(config: dict, idx: int = 0):
         policy = SAC(envs, config)
     elif config["exp"]["policy"] == "LQL":
         policy = LQL(envs, config)
-    elif config["exp"]["policy"] == "MetaRL":
-        policy = MetaRL(envs, config)
     else:
         raise ValueError
 
@@ -155,31 +157,35 @@ def trainable(config: dict, idx: int = 0):
             # train the policy (policy.train is reserved)
             train_logs = policy.learn(data)
 
-            # lazy define writer
-            if not trialdir.exists():
-                # save the current config
-                writer = SummaryWriter(trialdir)
-                writer.add_text(
-                    "hyperparameters",
-                    "|param|value|\n|-|-|\n%s"
-                    % (
-                        "\n".join([f"|{key}|{value}|" for key, value in config.items()])
-                    ),
-                )
+            # Evaluation
+            if global_step % 1000 == 0:
+                # lazy define writer
+                if not trialdir.exists():
+                    trialdir.mkdir(parents=True)
 
-            # lazy create the trial dir
-            if not (configpath := trialdir / "config.yaml").exists():
-                trialdir.mkdir(parents=True, exist_ok=True)
+                if configdir is None:
+                    configdir = trialdir / "config.yaml"
+                    with open(configdir, "w") as f:
+                        yaml.dump(config, f, Dumper=yaml.SafeDumper)
 
-                with open(configpath, "w") as f:
-                    yaml.dump(config, f, Dumper=yaml.SafeDumper)
+                if writer is None:
+                    # save the current config
+                    writer = SummaryWriter(trialdir)
+                    writer.add_text(
+                        "hyperparameters",
+                        "|param|value|\n|-|-|\n%s"
+                        % (
+                            "\n".join(
+                                [f"|{key}|{value}|" for key, value in config.items()]
+                            )
+                        ),
+                    )
 
-            # lazy define flogger
-            if not (historydir := trialdir / "train-history.h5").exists():
-                flogger = fym.Logger(historydir, max_len=1)
+                # lazy define flogger
+                if flogger is None:
+                    flogger = fym.Logger(trialdir / "train-history.h5", max_len=1)
 
-            # logging scalars to tensorboard
-            if global_step % 100 == 0:
+                # Train logs
                 for k, v in train_logs.items():
                     writer.add_scalar(k, v, global_step)
 
@@ -187,11 +193,11 @@ def trainable(config: dict, idx: int = 0):
                 logger.info(f"[{global_step}] SPS: {SPS}")
                 writer.add_scalar("charts/SPS", SPS, global_step)
 
-            # Evaluation
-            if global_step % 1000 == 0:
+                # Evaluation logs
                 eval_logs = evaluate(policy, config)
                 for k, v in eval_logs.items():
                     writer.add_scalar(k, v, global_step)
+
                 flogger.record(global_step=global_step, **eval_logs | train_logs)
 
             # Save the model into a checkpoint
@@ -208,8 +214,10 @@ def trainable(config: dict, idx: int = 0):
                 policy.train()
 
     envs.close()
-    writer.close()
-    flogger.close()
+    if writer is not None:
+        writer.close()
+    if flogger is not None:
+        flogger.close()
 
 
 def train_exp1(expdir=None, with_ray=False):
@@ -291,7 +299,7 @@ def train_exp1(expdir=None, with_ray=False):
         def remote_trainable(config, i):
             return trainable(config, i)
 
-        ray.init(num_cpus=10)
+        ray.init()
         futures = [
             remote_trainable.remote(merge(CONFIG, config, train_config), i)
             for exp_config in exp_configs
