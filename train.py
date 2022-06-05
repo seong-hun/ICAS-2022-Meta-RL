@@ -73,6 +73,7 @@ def evaluate(policy, config):
     logs = {
         "charts/episodic_return": episode_reward,
         "charts/episodic_length": step,
+        "charts/averge_return": episode_reward / step,
     }
     return logs
 
