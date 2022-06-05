@@ -207,7 +207,7 @@ class Multicopter(fym.BaseEnv):
                 "rotorfs": self.m * self.g * np.ones((4, 1)) / 4,
                 # equilibrium
                 "obs": np.zeros(6),
-                "action": np.zeros(4),
+                "action": self.m * self.g * np.ones(4) / 4,
                 # Aux
                 "fi": fi,
                 "fv": fv,
@@ -464,7 +464,12 @@ class QuadEnv(fym.BaseEnv, gym.Env):
             self.boundsout_reward = self.dtype(self.boundsout_reward)
 
         self.obs0 = np.zeros(self.observation_space.shape or 6, dtype=self.dtype)
-        self.action0 = np.zeros(self.action_space.shape or 4, dtype=self.dtype)
+        self.action0 = (
+            np.ones(self.action_space.shape or 4, dtype=self.dtype)
+            * self.plant.m
+            * self.plant.g
+            / 4
+        )
 
         # -- TEST ENV
         self.reset_mode = env_config["reset_mode"]
