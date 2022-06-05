@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from stable_baselines3.common.vec_env.dummy_vec_env import DummyVecEnv
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -75,8 +76,12 @@ class LQL(nn.Module):
         self.R = torch.tensor(np.diag(config["env_config"]["reward"]["R"])).to(device)
         self.x_dim = np.prod(envs.observation_space.shape)
 
-        self.obs0 = envs.get_attr("obs0")[0]
-        self.action0 = envs.get_attr("action0")[0]
+        if isinstance(envs, DummyVecEnv):
+            self.obs0 = envs.get_attr("obs0")[0]
+            self.action0 = envs.get_attr("action0")[0]
+        else:
+            self.obs0 = envs.obs0
+            self.action0 = envs.action0
 
     def get_action(self, obs, deterministic=False):
         assert isinstance(obs, np.ndarray)
