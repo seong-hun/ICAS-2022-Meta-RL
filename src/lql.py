@@ -83,6 +83,8 @@ class LQL(nn.Module):
             self.obs0 = envs.obs0
             self.action0 = envs.action0
 
+        self.alim = (envs.action_space.low, envs.action_space.high)
+
     def get_action(self, obs, deterministic=False):
         assert isinstance(obs, np.ndarray)
         if obs.ndim == 1:
@@ -97,9 +99,11 @@ class LQL(nn.Module):
             raise ValueError
 
         if deterministic:
-            return mean + self.action0
+            action = mean + self.action0
         else:
-            return action + self.action0
+            action = action + self.action0
+
+        return np.clip(action, *self.alim)
 
     def learn(self, data):
         dx = data.observations - self.obs0

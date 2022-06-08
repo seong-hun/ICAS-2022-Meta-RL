@@ -1,5 +1,6 @@
 import argparse
 import random
+import socket
 import time
 from datetime import datetime
 from pathlib import Path
@@ -222,7 +223,10 @@ def trainable(config: dict, idx: int = 0):
 
 
 def train_exp1(expdir=None, with_ray=False):
-    expdir = expdir or f"exp/exp1_{datetime.now().isoformat(timespec='seconds')}"
+    expdir = (
+        expdir
+        or f"exp/{socket.gethostname()}_{datetime.now().isoformat(timespec='seconds')}"
+    )
 
     exp_configs = [
         {

@@ -90,7 +90,7 @@ policy_config:
     target_network_frequency: 1
     tau: 0.005
 train:
-  batch_size: 256
+  batch_size: 10
   buffer_size: 50000
   learning_starts: 5000
   n_envs: 5
