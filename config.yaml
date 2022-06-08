@@ -1,95 +1,98 @@
-config:
-  alpha: 0.2
-  batch_size: 256
-  buffer_size: 1000000
-  env_config:
-    fkw:
-      dt: 0.02
-      max_t: 6
-    observation_space:
-      eta:
-        high:
-          - 0.3
-          - 0.3
-        low:
-          - -0.3
-          - -0.3
-      omega:
-        high:
-          - 30.0
-          - 30.0
-          - 30.0
-        low:
-          - -30.0
-          - -30.0
-          - -30.0
-      vz:
-        high: 10.0
-        low: -10.0
-    outer_loop: fixed
-    plant_config:
-      init:
-        pos:
-          - 0.0
-          - 0.0
-          - -5.0
-      task_config:
-        Jfrange:
-          - 0.8
-          - 1.2
-        fvrange:
-          - 0.0
-          - 0.6
-        max_frotors: 2
-        mfrange:
-          - 0.8
-          - 1.2
-        rfrange:
-          - 0.0
-          - 0.4
-    pos_des:
+env_config:
+  fkw:
+    dt: 0.001
+    max_t: 6
+  observation_scale:
+    bound: 1.0
+    init: 0.05
+  observation_space:
+    eta:
+      high:
+        - 0.7
+        - 0.7
+      low:
+        - -0.7
+        - -0.7
+    omega:
+      high:
+        - 30.0
+        - 30.0
+        - 30.0
+      low:
+        - -30.0
+        - -30.0
+        - -30.0
+    vz:
+      high: 20.0
+      low: -20.0
+  outer_loop: fixed
+  plant_config:
+    init:
+      pos:
+        - 0.0
+        - 0.0
+        - -5.0
+    task_config:
+      Jfrange:
+        - 0.8
+        - 1.2
+      fvrange:
+        - 0.0
+        - 0.6
+      max_frotors: 2
+      mfrange:
+        - 0.8
+        - 1.2
+      rfrange:
+        - 0.0
+        - 0.6
+  pos_des:
+    - 0.0
+    - 0.0
+    - -5.0
+  reset_mode: neighbor
+  reward:
+    Q:
+      - 1.0
+      - 20.0
+      - 20.0
       - 0.0
       - 0.0
-      - -5.0
-    reset:
-      mode: random
-      perturb_scale:
-        angles: 1
-        omega: 1
-        pos: 1
-        vel: 1
-    reward:
-      Q:
-        - 1
-        - 20
-        - 20
-        - 0.1
-        - 0.1
-        - 0.1
-      R:
-        - 0.1
-        - 0.1
-        - 0.1
-        - 0.1
-      boundsout:
-  fault_occurs: false
+      - 0.0
+    R:
+      - 1.0
+      - 1.0
+      - 1.0
+      - 1.0
+    boundsout:
+exp:
+  LoE: 0.0
+  dir: exp
+  fi: 3
+  hover: near
+  policy: LQL
+policy_config:
+  LQL:
+    behavior_std: 5
+    dtype: float64
+    policy_lr: 0.001
+    q_lr: 0.001
+    s: 1
+  SAC:
+    alpha: 0.2
+    dtype: float32
+    log_std_max: 2
+    log_std_min: -5
+    mgamma: 0.05
+    policy_frequency: 2
+    policy_lr: 0.002
+    q_lr: 0.0015
+    target_network_frequency: 1
+    tau: 0.005
+train:
+  batch_size: 10
+  buffer_size: 50000
   learning_starts: 5000
-  log_std_max: 2
-  log_std_min: -5
-  mgamma: 0.0156
   n_envs: 5
-  policy_frequency: 2
-  policy_lr: 0.000222
-  q_lr: 0.00146
-  rf:
-    - 1
-    - 1
-    - 1
-    - 0
   seed: 0
-  target_network_frequency: 1
-  tau: 0.005
-  total_timesteps: 20000
-tune_config:
-  local_dir:
-  num_samples: 32
+  total_timesteps: 150000

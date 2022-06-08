@@ -1,18 +1,21 @@
 import argparse
 from pathlib import Path
+from pprint import pprint
 
 import fym
 import matplotlib.pyplot as plt
 import numpy as np
-import ray.tune.trial
+import torch
 import yaml
 from loguru import logger
-from ray.rllib.agents import ppo
 from ray.tune import ExperimentAnalysis
 from scipy.spatial.transform import Rotation
 
-from src import env
-from src.env import QuadEnv
+from src.lql import LQL
+from src.sac import SAC
+from src.utils import make_env, merge
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 with open("config.yaml", "r") as f:
     CONFIG = yaml.load(f, Loader=yaml.SafeLoader)
@@ -34,53 +37,62 @@ def get_trial(nid=None):
     return trial
 
 
-def test(trial):
-    if trial is None:
+def test(trialdir):
+    trialdir = Path(trialdir)
+    if not trialdir.exists():
         raise ValueError("Cannot find a trial")
 
-    config = trial.config
+    with open(trialdir / "config.yaml", "r") as f:
+        config = yaml.load(f, Loader=yaml.SafeLoader)
 
-    logger.info(config)
+    test_config = {
+        "env_config": {
+            "fkw": {"max_t": 20, "dt": 0.001},
+            "outer_loop": "PID",
+            "observation_scale": {
+                "bound": 1.0,
+                "init": 0.1,
+            },
+        },
+    }
+    config = merge(config, test_config)
+    pprint(config)
+    env = make_env(config)
 
-    checkpoint = trial.checkpoint.value
-
-    logger.info(f"Using checkpoint: {checkpoint}")
-
-    # set agent weight to the checkpoint
-    agent = ppo.PPOTrainer(config=config)
-    agent.restore(checkpoint)
-
-    # make env
-    testpath = Path(checkpoint).parent / "test-flight.h5"
-    env_config = config["env_config"]
-    env_config["fkw"]["max_t"] = 20
-    env = QuadEnv(env_config)
-    env.logger = fym.Logger(path=testpath)
+    if config["exp"]["policy"] == "SAC":
+        policy = SAC(env, config)
+    elif config["exp"]["policy"] == "LQL":
+        policy = LQL(env, config)
+    else:
+        raise ValueError
+    policy.to(device)
+    last_checkpoint = sorted(trialdir.glob("checkpoint-*"))[-1]
+    model = torch.load(last_checkpoint)
+    policy.load_state_dict(model["policy"])
+    policy.eval()
 
     logger.info("Start test flight")
 
-    episode_reward = 0
-    done = False
+    env.logger = fym.Logger(trialdir / "test-flight.h5")
     obs = env.reset()
+    done = False
     while not done:
         env.render()
-        action = agent.compute_single_action(obs, explore=False)
-        obs, reward, done, _ = env.step(action)
-        episode_reward += reward
+        action = policy.get_action(obs, deterministic=True)
+        obs, _, done, _ = env.step(action)
 
     env.close()
 
     logger.info("End test flight")
 
 
-def plot_test(trial):
-    if not trial:
+def plot(trialdir):
+    trialdir = Path(trialdir)
+
+    if not trialdir:
         raise ValueError("Trial does not exist.")
 
-    testdir = Path(trial.checkpoint.value).parent
-    testpath = testdir / "test-flight.h5"
-
-    data = fym.load(testpath)
+    data = fym.load(trialdir / "test-flight.h5")
     if type(data) is not dict:
         raise ValueError("data should be dict")
 
@@ -139,18 +151,13 @@ def plot_test(trial):
     plt.show()
 
 
-def main():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-n", "--nid", type=int, default=None)
+    parser.add_argument("-t", "--trialdir", type=str)
+    parser.add_argument("-p", "--only-plot", type=str)
     args = parser.parse_args()
 
-    env.register()
+    if not args.only_plot:
+        test(trialdir=args.trialdir)
 
-    trial = get_trial(nid=args.nid)
-
-    test(trial)
-    plot_test(trial)
-
-
-if __name__ == "__main__":
-    main()
+    plot(trialdir=args.trialdir)
