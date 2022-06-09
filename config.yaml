@@ -1,98 +1,58 @@
-env_config:
-  fkw:
-    dt: 0.001
-    max_t: 6
-  observation_scale:
-    bound: 1.0
-    init: 0.05
-  observation_space:
-    eta:
-      high:
-        - 0.7
-        - 0.7
-      low:
-        - -0.7
-        - -0.7
-    omega:
-      high:
-        - 30.0
-        - 30.0
-        - 30.0
-      low:
-        - -30.0
-        - -30.0
-        - -30.0
-    vz:
-      high: 20.0
-      low: -20.0
-  outer_loop: fixed
-  plant_config:
-    init:
-      pos:
-        - 0.0
-        - 0.0
-        - -5.0
-    task_config:
-      Jfrange:
-        - 0.8
-        - 1.2
-      fvrange:
-        - 0.0
-        - 0.6
-      max_frotors: 2
-      mfrange:
-        - 0.8
-        - 1.2
-      rfrange:
-        - 0.0
-        - 0.6
-  pos_des:
-    - 0.0
-    - 0.0
-    - -5.0
-  reset_mode: neighbor
-  reward:
-    Q:
-      - 1.0
-      - 20.0
-      - 20.0
-      - 0.0
-      - 0.0
-      - 0.0
-    R:
-      - 1.0
-      - 1.0
-      - 1.0
-      - 1.0
-    boundsout:
-exp:
-  LoE: 0.0
-  dir: exp
-  fi: 3
-  hover: near
-  policy: LQL
-policy_config:
-  LQL:
-    behavior_std: 5
-    dtype: float64
-    policy_lr: 0.001
-    q_lr: 0.001
-    s: 1
-  SAC:
-    alpha: 0.2
-    dtype: float32
-    log_std_max: 2
-    log_std_min: -5
-    mgamma: 0.05
-    policy_frequency: 2
-    policy_lr: 0.002
-    q_lr: 0.0015
-    target_network_frequency: 1
-    tau: 0.005
-train:
-  batch_size: 10
-  buffer_size: 50000
-  learning_starts: 5000
-  n_envs: 5
-  seed: 0
-  total_timesteps: 150000
+# Environments
+dt: 0.001
+norm:
+  # fT: 30
+  action: 1
+  obs:
+    [1, 1, 1,  # F_des
+    1, 1, 1]  # omega
+  # n_des: [0.1, 0.1, 1]
+  # omega: [10, 10, 50]
+
+
+# Inner RL parameters
+Q: [20, 20, 0, 0, 0]
+R: [1, 1, 1, 1]
+s: 1
+# obs_to_state_index: [1, 2, 4, 5, 6]
+
+# Preprocessing parameters
+preprocess_path: "data/preprocess"
+prep_max_t: 2
+num_tasks: 100
+freevar_max: 0.6
+num_transitions_per_task: 1500
+record_dt: 0.01
+
+# Dataset parameters
+transit_size: 1000
+context_size: 50
+num_frames: 8
+
+# Training hyperparameters
+x_dim: 5
+u_dim: 4
+z_dim: 50
+# Periods
+num_epochs: 1000
+model_save_period: 50
+batch_size: 10
+stream_period: 50
+log_period: 50
+
+cnt_weight: 1
+mch_weight: 1
+lyap_weight: 10
+
+# Testing parameters
+test:
+  max_t: 20
+  num_epochs: 5000
+  stream_period: 50
+  log_period: 50
+tsne:
+  n_components: 2
+  perplexity: 8
+  n_iter: 10000
+  init: "random"
+  learning_rate: "auto"

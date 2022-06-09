@@ -1,77 +1,127 @@
-import functools
+import logging
 import warnings
 
 import fym
-import gym
 import numpy as np
 import scipy.optimize
+import yaml
 from fym.utils.rot import hat
-from gym import spaces
+from loguru import logger as loguru_logger
+from numpy.linalg import matrix_rank
 from scipy.spatial.transform import Rotation
+
+from src.utils import arr2str
+
+logger = logging.getLogger(__name__)
+
+with open("config.yaml", "r") as f:
+    config = yaml.load(f, Loader=yaml.FullLoader)
 
 
 def cross(x, y):
     return np.cross(x, y, axis=0)
 
 
-def ncross(x, y):
-    c = cross(x, y)
-    return c / np.linalg.norm(c)
+def perturb(system, size):
+    if np.shape(size) == ():
+        _perturb = size * np.random.randn(*system.state.shape)
+    else:
+        _perturb = size
+    system.state = system.state + _perturb
+
+
+def ctrb_matrix(A, B, normalized=False):
+    assert (n := A.shape[0]) == A.shape[1]
+    f = A.max() if normalized else 1
+    C = np.hstack([np.linalg.matrix_power(A, i) / f**i @ B for i in range(n)])
+    return C
+
+
+def ctrb(A, B):
+    C = ctrb_matrix(A, B, normalized=True)
+    return matrix_rank(C) == A.shape[0]
+
+
+class SimpleLinearEnv:
+    def __init__(self):
+        self.x = np.zeros(3)
+        self.dt = config["dt"]
+        self.t = 0
+
+        self.A = np.array([[0, 1, 0], [0, 0, 1], [1, 1, 1]])
+        self.B = np.array([[0, 1], [0, 0], [1, 0]])
+        loguru_logger.debug(f"Controllability: {ctrb(self.A, self.B)}")
+
+    def render(self):
+        pass
+
+    def reset(self, random=True):
+        self.x = np.random.randn(3)
+        self.t = 0
+        return self.x.copy()
+
+    def step(self, u):
+        t = self.t
+        next_x = (
+            self.x + self.dt * (+self.A @ self.x[:, None] + self.B @ u[:, None]).ravel()
+        )
+        reward = [-(self.x**2).sum() - (u**2).sum()]
+        done = self.t > 1
+        info = {
+            "t": t,
+        }
+
+        self.x = next_x
+        self.t += self.dt
+        return next_x, reward, done, info
 
 
 class Multicopter(fym.BaseEnv):
-    """A Multicopter enviroment with a varying LoE feature.
+    """S. Mallavalli and A. Fekih, “A fault tolerant tracking control for a
+    quadrotor UAV subject to simultaneous actuator faults and exogenous
+    disturbances,” International Journal of Control, vol. 93, no. 3, pp.
+    655–668, Mar. 2020, doi: 10.1080/00207179.2018.1484173."""
 
-    Configuration:
+    """ Physical constants """
+    g = 9.81
 
+    """ Physical properties """
+    m = 1.00  # [kg] mass
+    l = 0.24  # [m] torque arm
+    _J = np.diag([8.1, 8.1, 14.2]) * 1e-3
+    _Jr = np.diag([0, 0, 1.04]) * 1e-6
+    b = 5.42e-5  # [N s^2 / rad^2] thrust coeff.
+    d = 1.1e-6  # [N m s^2 / rad^2] reaction torque coeff.
+    Kf = np.diag([5.567, 5.567, 6.354]) * 1e-4  # [N.s/m] drag coeff.
+    Kt = np.diag([5.567, 5.567, 6.354]) * 1e-4  # [N.s/rad] aerodynamic drag
+    rotorf_min = 0.0  # [N]
+    rotorf_max = b * 523.0**2  # [N]
+
+    """ Auxiliary constants """
+    e3 = np.vstack((0, 0, 1))
+    nrotors = 4
+
+    """ Configuration
           ^ x
           |
          (0)
     - (3) + (1) -> y
          (2)
           |
-
-    Reference:
-        - S. Mallavalli and A. Fekih, “A fault tolerant tracking control for a
-          quadrotor UAV subject to simultaneous actuator faults and exogenous
-          disturbances,” International Journal of Control, vol. 93, no. 3, pp.
-          655–668, Mar. 2020, doi: 10.1080/00207179.2018.1484173.
     """
-
-    g = 9.81
-    m = 1.00  # [kg] mass
-    r = 0.24  # [m] torque arm
-    J = np.diag([8.1, 8.1, 14.2]) * 1e-3
-    Jinv = np.linalg.inv(J)
-    b = 5.42e-5  # [N s^2 / rad^2] thrust coeff.
-    d = 1.1e-6  # [N m s^2 / rad^2] reaction torque coeff.
-    Kf = np.diag([5.567, 5.567, 6.354]) * 1e-4  # [N.s/m] drag coeff.
-    Kt = np.diag([5.567, 5.567, 6.354]) * 1e-4  # [N.s/rad] aerodynamic drag
-    rotorf_min = 0  # [N]
-    # rotorf_max = b * 523.0**2  # [N]
-    rotorf_max = 20  # [N]
-    """ Auxiliary constants """
-    e3 = np.vstack((0, 0, 1))
-    nrotors = 4
+    # (F, M) = B @ rotorfs
+    # rotorfs = b * rotorws**2; rotorws: rotor speed
     B = np.array(
-        [
-            [1, 1, 1, 1],
-            [0, -r, 0, r],
-            [r, 0, -r, 0],
-            [-d / b, d / b, -d / b, d / b],
-        ]
+        [[1, 1, 1, 1], [0, -l, 0, l], [l, 0, -l, 0], [-d / b, d / b, -d / b, d / b]]
     )
-    Lambda = None
 
-    def __init__(self, plant_config):
+    def __init__(self):
         super().__init__()
-        self.pos = fym.BaseSystem(np.array(plant_config["init"]["pos"])[:, None])
+        self.pos = fym.BaseSystem(np.vstack((0, 0, -2)))
         self.vel = fym.BaseSystem(np.zeros((3, 1)))
         self.R = fym.BaseSystem(np.eye(3))
         self.omega = fym.BaseSystem(np.zeros((3, 1)))
-
-        self.task_config = plant_config["task_config"]
-        self.task = None
+        self.J = self._J
 
     def deriv(self, pos, vel, R, omega, rotorfs):
         u = self.B @ rotorfs
@@ -85,7 +135,7 @@ class Multicopter(fym.BaseEnv):
         )
         dR = R @ hat(omega)
         domega = self.Jinv @ (
-            M - cross(omega, self.J @ omega) - np.linalg.norm(omega) * self.Kt @ omega
+            +M - cross(omega, self.J @ omega) - np.linalg.norm(omega) * self.Kt @ omega
         )
         return dpos, dvel, dR, domega
 
@@ -96,71 +146,121 @@ class Multicopter(fym.BaseEnv):
         self.pos.dot, self.vel.dot, self.R.dot, self.omega.dot = dots
         return dict(rotorfs=rotorfs)
 
-    def R2angles(self, deg=False, R=None):
-        if R is None:
-            R = self.R.state
-        angles = Rotation.from_matrix(R).as_euler("ZYX")[::-1]
-        if deg:
-            return np.rad2deg(angles)
-        else:
-            return angles
-
     def set_valid(self, t, rotorfs_cmd):
         """Saturate the rotor angular velocities and set faults."""
         rotorfs = np.clip(rotorfs_cmd, self.rotorf_min, self.rotorf_max)
-        return self.Lambda @ rotorfs
+        return self.get_Lambda(t) @ rotorfs
 
-    def get_task(self, random=False, **kwargs):
-        # default task
-        task = {
-            "rf": np.ones(4),  # rotor faults (0: complete failure, 1: healthy)
-            "fi": (),  # fault index
-            "mf": 1,  # loss of mass
-            "Jf": np.ones(3),  # loss of J
-            "fv": 0.5,  # free variable
-        }
+    def get_Lambda(self, t):
+        Lambda = np.eye(self.nrotors)
+        if t >= 0:  # Currently, the fault occurs at the start
+            Lambda = self.LoE
+        return Lambda
 
-        # update with random task
+    def get_fault_index(self, t=0):
+        return tuple(np.flatnonzero(np.diag(self.get_Lambda(t)) == 0))
+
+    @property
+    def J(self):
+        return self._J
+
+    @J.setter
+    def J(self, J):
+        self._J = J
+        self._Jinv = np.linalg.inv(J)
+
+    @property
+    def Jinv(self):
+        return self._Jinv
+
+
+class Env(fym.BaseEnv):
+    def __init__(self, max_t=10):
+        super().__init__(max_t=max_t, dt=config["dt"])
+        self.plant = Multicopter()
+
+        # Define observation and action spaces for dimension references
+        self.observation_dim = 6  # omega (3) and n_des (3)
+        self.action_dim = 4  # each rotor forces
+
+    def reset(self, random=True):
+        super().reset()
         if random:
-            rand_rf = np.ones(4)
-            rand_fi = tuple(
-                sorted(
-                    np.random.choice(
-                        range(4),
-                        np.random.randint(1, self.task_config["max_frotors"] + 1),
-                        replace=False,
-                    )
-                )
+            perturb(self.plant.pos, 0.3)
+            perturb(self.plant.vel, 0.5)
+            angles = Rotation.from_matrix(self.plant.R.state).as_euler("ZYX")
+            angles += np.deg2rad(10 * np.random.randn(3))
+            self.plant.R.state = Rotation.from_euler("ZYX", angles).as_matrix()
+            perturb(self.plant.omega, 4)
+        return self.observation()
+
+    def observation(self):
+        return {"t": self.clock.get(), **self.plant.observe_dict()}
+
+    def step(self, rotorfs_cmd):
+        info, done = self.update(rotorfs_cmd=rotorfs_cmd)
+
+        next_state = self.observation()
+        reward = 0
+        return next_state, reward, done or self.terminal(), info
+
+    def terminal(self):
+        pos, vel, R, omega = self.plant.observe_list()
+
+        # Attitude bound condition
+        _, theta, phi = np.rad2deg(Rotation.from_matrix(R).as_euler("ZYX"))
+        if abs(phi) > 70 or abs(theta) > 70:
+            loguru_logger.debug(
+                "DONE: angles out | "
+                f"phi: {phi:5.2f} [deg], theta: {theta:5.2f} [deg]"
             )
-            for i in rand_fi:
-                rand_rf[i] = np.random.uniform(*self.task_config["rfrange"])
+            return True
 
-            task |= {
-                "rf": rand_rf,
-                "fi": rand_fi,
-                "mf": np.random.uniform(*self.task_config["mfrange"]),
-                "Jf": np.random.uniform(*self.task_config["Jfrange"], size=3),
-                "fv": np.random.uniform(*self.task_config["fvrange"]),
-            }
+        if np.any(abs(omega) > 80):
+            loguru_logger.debug(f"DONE: omega out | omega: {arr2str(omega)} [rad/s]")
+            return True
 
-        # update with given task
-        task |= kwargs
+        if pos[2] > 0:  # Fall to the ground
+            loguru_logger.debug(f"DONE: altitude out | h: {-pos[2]} [m]")
+            return True
 
-        # update fault index to match rotor faults (rf)
-        task["fi"] = tuple(
-            i for i, v in enumerate(task["rf"]) if v <= self.task_config["rfrange"][1]
+        return False
+
+    def get_reward(self, state, action, next_state):
+        return 0
+
+    def set_dot(self, t, rotorfs_cmd):
+        plant_info = self.plant.set_dot(t, rotorfs_cmd)
+        return dict(
+            t=t,
+            **self.observe_dict(),
+            rotorfs_cmd=rotorfs_cmd,
+            plant_info=plant_info,
+            obs=self.observation(),
         )
 
-        return task
-
     def set_task(self, task):
-        self.Lambda = np.diag(task["rf"])
-        self.m *= task["mf"]
-        self.J = np.diag(task["Jf"]) @ self.J
-        self.task = task
+        self.plant.LoE = np.diag(task["LoE"])
+        self.plant.m *= task["LoM"]
+        self.plant.J = np.diag(task["LoJ"]) @ self.plant.J
+        self.task = dict(
+            task,
+            fault_index=(np.argmin(task["LoE"]),),
+            NHS=self.find_NHS(freevar=task["freevar"]),
+        )
 
-    def find_NHS(self):
-        def get_errors(x):
+    def get_random_task(self):
+        LoE = np.ones(4)
+        LoE[np.random.randint(4)] = 0.2 * np.random.rand()
+        return {
+            "LoE": LoE,  # Loss of effectiveness
+            "LoM": np.random.uniform(0.95, 1),  # Loss of mass
+            "LoJ": np.random.uniform(0.95, 1, size=3),  # Loss of J
+            "freevar": config["freevar_max"] * np.random.rand(),
+        }
+
+    def find_NHS(self, freevar=0.4):
+        def fun(x):
             """Nonlinear function to be zero.
 
             Parameters
@@ -170,130 +270,88 @@ class Multicopter(fym.BaseEnv):
                 rotorfs).  angles: phi, theta
 
             """
-            m, g = self.m, self.g
-            e3 = zB = self.e3
+            m, g = plant.m, plant.g
+            e3 = zB = plant.e3
 
             phi, theta, omega, rotorfs = x[0], x[1], x[2:5], x[5:]
             R = Rotation.from_euler("ZYX", [0, theta, phi]).as_matrix()
             omega = omega[:, None]
             rotorfs = Full @ rotorfs[:, None]
-            rotorfs = self.set_valid(0, rotorfs)
+            rotorfs = plant.set_valid(0, rotorfs)
 
             pos = vel = np.zeros((3, 1))
-            *_, domega = self.deriv(pos, vel, R, omega, rotorfs)
+            *_, domega = plant.deriv(pos, vel, R, omega, rotorfs)
 
-            fT = (self.B @ rotorfs)[0]
+            fT = (plant.B @ rotorfs)[0]
 
             omega_norm = np.linalg.norm(omega)
             zBomega = zB.T @ omega
 
             # Construct constraints
-            e1 = fT - m * g * omega_norm / np.abs(zBomega)
-            e2 = np.sign(zBomega) / omega_norm * R @ omega - e3
-            e3 = domega
+            consts = []
 
-            errors = [np.square(e).sum() for e in [e1 * 10, e2 * 20, e3]]
-            return errors
+            # Constraint 1
+            consts.append(fT - m * g * omega_norm / np.abs(zBomega))
 
-        assert self.task is not None, "Task must be set"
+            # Constraint 2
+            consts.append(np.sign(zBomega) / omega_norm * R @ omega - e3)
 
-        fi = tuple(self.task["fi"])
-        fv = self.task["fv"]
+            # Constraint 3
+            consts.append(domega)
 
-        if fi == ():
-            NHS = {
-                # NHS
-                "omega": np.zeros((3, 1)),
-                "rotorfs": self.m * self.g * np.ones((4, 1)) / 4,
-                # equilibrium
-                "obs": np.zeros(6),
-                "action": self.m * self.g * np.ones(4) / 4,
-                # Aux
-                "fi": fi,
-                "fv": fv,
-                "angles": [0, 0, 0],
-                "R": np.eye(3),
-                "opt_result": None,
-                "errors": None,
-            }
-            return NHS
+            consts_raveled = np.hstack(list(map(np.ravel, consts)))
+            error = consts_raveled**2 * [
+                1,  # for const 1
+                100,
+                100,
+                100,  # for const 2
+                1,
+                1,
+                1,  # for const3
+            ]
+            # if error < 80:
+            #     breakpoint()
+            return np.sum(error)
 
-        Full = np.delete(np.eye(self.nrotors), fi, axis=1)
-        n_normal = self.nrotors - len(fi)  # number of healthy rotors
+        plant = self.plant
+        fi = np.argmin(np.diag(plant.LoE))  # single fault_index
 
-        if fi == (0,):
-            omega0 = [5, 0, 15]
-            rotorfs0 = [4, 1, 4]
-        elif fi == (1,):
-            omega0 = [0, -5, -15]
-            rotorfs0 = [4, 4, 1]
-        elif fi == (2,):
-            omega0 = [-5, 0, 15]
-            rotorfs0 = [1, 4, 4]
-        elif fi == (3,):
-            omega0 = [0, 5, -15]
-            rotorfs0 = [4, 1, 4]
-        elif fi == (0, 1):
-            omega0 = [-25, -10, -20]
-            rotorfs0 = [12, 4]
-        elif fi == (1, 2):
-            omega0 = [-12, 6, 20]
-            rotorfs0 = [6, 2]
-        elif fi == (2, 3):
-            omega0 = [20, 10, -20]
-            rotorfs0 = [12, 4]
-        elif fi == (0, 3):
-            omega0 = [4, -25, 20]
-            rotorfs0 = [12, 4]
-        elif fi == (0, 2):
-            omega0 = [0, -15, 15]
-            rotorfs0 = [10, 4]
-        elif fi == (1, 3):
-            omega0 = [15, 1, -18]
-            rotorfs0 = [10, 3]
-        else:
-            raise ValueError
+        Full = np.delete(np.eye(plant.nrotors), fi, axis=1)
+        n_normal = plant.nrotors - 1
+        rotorfs = np.ones(n_normal) * plant.m * plant.g / n_normal
 
         x0 = np.hstack(
             (
-                np.deg2rad([1, 1]),  # angles (phi, theta, psi)
-                omega0,
-                rotorfs0,
+                np.deg2rad([10, 10]),  # angles (phi, theta, psi)
+                np.array([1, 1, 20 * (-1) ** fi]),  # omega
+                rotorfs,
             )
         )
 
         bounds = (
-            2 * [np.deg2rad([-80, 80]).tolist()]
-            + 3 * [(-70, 70)]  # omega
-            + n_normal * [(self.rotorf_min, self.rotorf_max)]  # rotors
+            2 * [np.deg2rad([-80, 80])]  # phi, theta
+            + 3 * [(-50, 50)]  # omega
+            + n_normal * [(plant.rotorf_min, plant.rotorf_max)]  # rotors
         )
 
         # u = x[5:8]
         ui = 5
+        left_i = fi % 3
+        oppose_i = (left_i + 1) % 3
+        right_i = (left_i + 2) % 3
 
-        if len(fi) == 1:
-            left_i = fi[0] % 3  # the rotor left to the fault rotor
-            oppose_i = (left_i + 1) % 3
-            right_i = (left_i + 2) % 3
-
-            constraints = [
-                {
-                    "type": "eq",
-                    "fun": lambda x: x[ui + oppose_i] / x[ui + left_i] - fv,
-                },
-                {"type": "eq", "fun": lambda x: x[ui + left_i] - x[ui + right_i]},
-            ]
-        elif len(fi) == 2:
-            constraints = [
-                {"type": "eq", "fun": lambda x: x[ui + 1] / x[ui] - fv},
-            ]
-        else:
-            constraints = []
+        constraints = [
+            {
+                "type": "eq",
+                "fun": lambda x: x[ui + oppose_i] / x[ui + left_i] - freevar,
+            },
+            {"type": "eq", "fun": lambda x: x[ui + left_i] - x[ui + right_i]},
+        ]
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             result = scipy.optimize.minimize(
-                fun=lambda x: np.sum(get_errors(x)),
+                fun=fun,
                 x0=x0,
                 method="SLSQP",
                 tol=1e-10,
@@ -301,373 +359,114 @@ class Multicopter(fym.BaseEnv):
                 constraints=constraints,
                 options={},
             )
-
         x = result.x
-
-        omega = x[2:5][:, None]
-        rotorfs = Full @ x[5:][:, None]
-
-        omega0 = omega.ravel()
-        eta0 = (-omega0 / np.linalg.norm(omega0) * np.sign(omega0[-1]))[:2]
-        obs = np.hstack((0, eta0, omega0))
-        action = rotorfs.ravel()
 
         NHS = {
             # NHS
-            "omega": omega,
-            "rotorfs": rotorfs,
-            # equilibrium
-            "obs": obs,
-            "action": action,
+            "omega": x[2:5][:, None],
+            "rotorfs": Full @ x[5:][:, None],
             # Aux
-            "fi": fi,
-            "fv": fv,
+            "fault_index": (fi,),
+            "freevar": freevar,
             "angles": [x[0], x[1], 0],  # phi, theta, psi
             "R": Rotation.from_euler("ZYX", [0, x[1], x[0]]).as_matrix(),
             "opt_result": result,
-            "errors": get_errors(x),
         }
         return NHS
 
 
-class PID:
-    def __init__(self, kP, kI, kD, dt):
-        self.kP = kP
-        self.kI = kI
-        self.kD = kD
-        self.dt = dt
-
-        self._prev_e = None
-        self._prev_e_int = 0
-
-    def get(self, e):
-        # At first, prev_e = e
-        prev_e = self._prev_e or e
-
-        e_deriv = (e - prev_e) / self.dt
-        e_int = self._prev_e_int
-
-        u = self.kP * e + self.kI * e_int + self.kD * e_deriv
-        return u
-
-    def update(self, e):
-        prev_e = self._prev_e or e
-        e_int = self._prev_e_int
-
-        if self.kI:
-            self._prev_e_int = e_int + (prev_e + e) / 2 * self.dt  # trapz
-        if self.kD:
-            self._prev_e = e
-
-
-class FixedOuterLoop:
+class EnvWrapper:
     def __init__(self, env):
-        m = env.plant.m
-        g = env.plant.g
-        self.F_des_i = m * g * np.vstack((0, 0, -1))
-
-    def get(self, pos):
-        return self.F_des_i
-
-    def update(self, pos):
-        pass
-
-
-class PIDOuterLoop:
-    def __init__(self, env):
+        self.env = env
+        self.plant = env.plant
         self.clock = env.clock
 
-        # PID outer-loop controller
-        dt = self.clock.dt
-        self.PID_x = PID(kP=0.25, kI=0.006, kD=0.4, dt=dt)
-        self.PID_y = PID(kP=0.25, kI=0.006, kD=0.4, dt=dt)
-        self.PID_z = PID(kP=1, kI=0.1, kD=1, dt=dt)
+        self.Q = np.diag(config["Q"])
+        self.R = np.diag(config["R"])
 
-        # set reference
-        self.get_pos_ref = lambda t: np.vstack((0, 0, -5))
+    def set_task(self, task):
+        self.env.set_task(task)
+        self.task = self.env.task
 
-        # Constants
-        self.m = env.plant.m
-        self.g = env.plant.g
-        self.e3 = env.plant.e3
+    def get_random_task(self):
+        return self.env.get_random_task()
 
-    def get(self, pos):
-        t = self.clock.get()
-        pos_ref = self.get_pos_ref(t)
-        pos_error = (pos_ref - pos).ravel()
+    def observation(self):
+        return self.obs_wrapper(self.env.observation())
 
-        ax_des = self.PID_x.get(pos_error[0])
-        ay_des = self.PID_y.get(pos_error[1])
-        az_des = self.PID_z.get(pos_error[2])
-        a_des = np.vstack((ax_des, ay_des, az_des))
+    def render(self, **kwargs):
+        self.env.render(**kwargs)
 
-        F_des_i = self.m * (a_des - self.g * self.e3)
-        return F_des_i
-
-    def update(self, pos):
-        t = self.clock.get()
-        pos_ref = self.get_pos_ref(t)
-        pos_error = (pos_ref - pos).ravel()
-        self.PID_x.update(pos_error[0])
-        self.PID_y.update(pos_error[1])
-        self.PID_z.update(pos_error[2])
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        return self.obs_wrapper(obs)
 
 
-class QuadEnv(fym.BaseEnv, gym.Env):
-    def __init__(self, env_config):
-        super().__init__(**env_config["fkw"])
-        self.plant = Multicopter(plant_config=env_config["plant_config"])
+class RLEnvWrapper(EnvWrapper):
+    def __init__(self, env, except_near=False):
+        super().__init__(env)
+        self.except_near = except_near
 
-        # set the outer loop
-        if env_config["outer_loop"] == "PID":
-            self.outer = PIDOuterLoop(self)
-        elif env_config["outer_loop"] == "fixed":
-            self.outer = FixedOuterLoop(self)
+    def obs_wrapper(self, obs):
+        R = obs["R"]
+        omega = obs["omega"]
 
-        self.dtype = np.float64
+        F_des_i = -self.plant.m * self.plant.g * self.plant.e3
+        F_des_b = R.T @ F_des_i
+        F_des_norm = np.linalg.norm(F_des_b)
+        n_des_b = F_des_b / max(F_des_norm, 1e-13)
 
-        # -- FOR RL
-        # observation: vz (1), eta (2), omega (3) -- TOTAL: 6
-        get_limits = lambda end, scale: self.dtype(
-            np.hstack(
-                [
-                    env_config["observation_space"][k][end]
-                    for k in ["vz", "eta", "omega"]
-                ]
+        eta = n_des_b[:2]
+        alpha = omega
+        x = np.vstack(
+            (
+                eta,
+                alpha,
             )
-            * scale
         )
-        self.observation_space = spaces.Box(
-            low=get_limits("low", env_config["observation_scale"]["bound"]),
-            high=get_limits("high", env_config["observation_scale"]["bound"]),
-            dtype=self.dtype,
-        )
-
-        self.initial_space = spaces.Box(
-            low=get_limits("low", env_config["observation_scale"]["init"]),
-            high=get_limits("high", env_config["observation_scale"]["init"]),
-            dtype=self.dtype,
-        )
-
-        # action: rotorfs (4)
-        self.action_space = spaces.Box(
-            low=0, high=self.plant.rotorf_max, shape=(4,), dtype=self.dtype
-        )
-
-        # reward (- LQR cost)
-        self.LQR_Q = self.dtype(np.diag(env_config["reward"]["Q"]))
-        self.LQR_R = self.dtype(np.diag(env_config["reward"]["R"]))
-        # scaling reward for discretization
-        self.reward_scale = self.dtype(self.clock.dt)
-        self.boundsout_reward = env_config["reward"]["boundsout"]
-        if self.boundsout_reward is not None:
-            self.boundsout_reward = self.dtype(self.boundsout_reward)
-
-        self.obs0 = np.zeros(self.observation_space.shape or 6, dtype=self.dtype)
-        self.action0 = (
-            np.ones(self.action_space.shape or 4, dtype=self.dtype)
-            * self.plant.m
-            * self.plant.g
-            / 4
-        )
-
-        # -- TEST ENV
-        self.reset_mode = env_config["reset_mode"]
-
-        # NHS
-        self.NHS = {}
-
-    def step(self, action):
-        # -- BEFORE UPDATE
-        obs = self.observation()
-        pos = self.plant.pos.state
-
-        # Update the action in line with the desired total thrust
-        F_des_i = self.outer.get(pos)
-        F_des_norm = np.linalg.norm(F_des_i)
-        action = (F_des_norm - sum(action)) * np.ones(4) / 4 + action
-
-        # -- UPDATE
-        # ``info`` contains ``t`` and ``state_dict``
-        _, done = self.update(action=action)
-        self.outer.update(pos=pos)
-
-        # -- AFTER UPDATE
-        # get reward
-        next_obs = self.observation()
-        reward = self.get_reward(obs, action)
-        # get done
-        bounds_out = not self.contains(next_obs)
-        done = done or bounds_out
-        # get info
-        info = {}
-        return next_obs, reward, done, info
-
-    def reset(self):
-        """Reset the plant states.
-
-        Parameters
-        ----------
-        mode : {"neighbor", "initial"}
-        """
-        super().reset()
-
-        if self.reset_mode == "neighbor":
-            obs = self.obs0 + self.initial_space.sample()
-            pos, vel, R, omega = self.obs2state(obs)
-            self.plant.pos.state = pos
-            self.plant.vel.state = vel
-            self.plant.R.state = R
-            self.plant.omega.state = omega
-        elif self.reset_mode == "initial":
-            pass
-        else:
-            raise ValueError
-
-        obs = self.observation()
-        assert self.contains(obs), breakpoint()
-
+        obs = x.ravel()
         return obs
 
-    def contains(self, obs):
-        # General bound of attitude
-        if 1 - sum(obs[1:3] ** 2) < 0:
-            return False
-        return self.observation_space.contains(obs - self.obs0)
+    def action_wrapper(self, action):
+        rotorfs = action[:, None]
+        return rotorfs
 
-    def set_dot(self, t, action):
-        # make a 2d vector from an 1d array
-        rotorfs_cmd = np.float64(action[:, None])
-        plant_info = self.plant.set_dot(t, rotorfs_cmd)
-        return {
-            "t": t,
-            "rotorfs_cmd": rotorfs_cmd,
-            "plant_info": plant_info,
-            **self.observe_dict(),
-        }
+    def step(self, action):
+        rotorfs = self.action_wrapper(action)
+        next_obs, reward, done, info = self.env.step(rotorfs)
+        next_o = self.obs_wrapper(next_obs)
+        if self.except_near:
+            o = self.obs_wrapper(info["obs"])
+            near = np.sum((next_o - o) ** 2) < 1e-6
+            done = done or near
+        return next_o, reward, done, info
 
-    def observation(self, dtype=None):
-        # get states
-        pos, vel, R, omega = self.plant.observe_list()
 
-        # make obs
-        vz = vel.ravel()[2]
-        # get n_i
-        F_des_i = self.outer.get(pos)
-        F_des_norm = np.linalg.norm(F_des_i)
-        n_i = F_des_i / max(F_des_norm, 1e-13)
-        n_b = R.T @ n_i
-        eta = n_b.ravel()[:2]
-        omega = omega.ravel()
-        obs = np.hstack((vz, eta, omega))
+class TrimmedEnvWrapper(EnvWrapper):
+    def __init__(self, env, omega0, rotorfs0):
+        super().__init__()
+        n0_b = -omega0 / np.linalg.norm(omega0) * np.sign(omega0[-1])
+        eta0 = n0_b[:2]
+        self.x0 = np.vstack((eta0, omega0)).ravel()
+        self.rotorfs0 = rotorfs0.ravel()
 
-        # set dtype for RL policies
-        return self.dtype(obs)
+    def obs_wrapper(self, obs):
+        return obs - self.x0
 
-    def get_reward(self, obs, action):
-        obs = (obs - self.obs0)[:, None]
-        action = (action - self.action0)[:, None]
+    def action_wrapper(self, action):
+        rotorfs = self.rotorfs0 + action
+        return rotorfs
 
-        # hovering reward
-        reward = -(obs.T @ self.LQR_Q @ obs + action.T @ self.LQR_R @ action).ravel()
+    def step(self, action):
+        obs = self.obs_wrapper(self.env.observation())
+        rotorfs = self.action_wrapper(action)
+        next_obs, _, done, info = self.env.step(rotorfs)
+        reward = self.get_reward(obs, action)
+        return self.obs_wrapper(next_obs), reward, done, info
 
-        # if self.boundsout_reward is None, then reward = - LQR cost
-        # elif self.boundsout_reward set to some value,
-        # then reward = self.boundsout_reward - LQR cost
-        if self.boundsout_reward is not None:
-            reward += self.boundsout_reward
-
-        # scaling
-        reward *= self.reward_scale
-        return reward.item()
-
-    def eta2R(self, eta):
-        n3 = np.vstack((eta, -np.sqrt(1 - (eta**2).sum())))
-        e3 = np.vstack((0, 0, 1))
-
-        RT = np.zeros((3, 3))
-        e3xn3 = ncross(e3, n3)
-        if np.all(np.isclose(e3xn3, 0)):
-            e3xn3 = np.vstack((0, 1, 0))
-        RT[:, 0:1] = -ncross(e3xn3, n3)
-        RT[:, 1:2] = e3xn3
-        RT[:, 2:3] = -n3
-
-        return RT.T
-
-    def obs2state(self, obs):
-        """Convert observation to pos, vel, R, omega."""
-        vz = obs[0]
-        eta = obs[1:3][:, None]
-        omega = obs[3:][:, None]
-
-        pos = self.plant.pos.initial_state
-        vel = np.vstack((0, 0, vz))
-        R = self.eta2R(eta)
-        return pos, vel, R, omega
-
-    def set_NHS(self, NHS):
-        assert self.NHS == {}
-        self.NHS = NHS
-
-        self.obs0 = self.dtype(NHS["obs"])
-        self.action0 = self.dtype(NHS["action"])
-
-        self.plant.R.initial_state = NHS["R"]
-        self.plant.omega.initial_state = NHS["omega"]
-
-    def get_mueller_params(self):
-        def deriv(x, u):
-            vz, eta, omega = x[0], x[1:3], x[3:]
-
-            pos = np.zeros((3, 1))
-            vel = np.vstack((0, 0, vz))
-            R = self.eta2R(eta)
-            rotors = hrotorfs + udist @ u
-            rotors[(fi,)] = 0
-
-            _, vel_dot, _, omega_dot = plant.deriv(pos, vel, R, omega, rotors)
-
-            n3 = np.vstack((eta, -np.sqrt(1 - (eta**2).sum())))
-            n_dot = -cross(omega, n3)
-
-            return np.vstack((vel_dot[2], n_dot[:2], omega_dot))
-
-        assert self.plant.task is not None
-        assert self.NHS is not None
-
-        plant = self.plant
-        fi = self.plant.task["fi"]
-        hrotorfs = self.NHS["rotorfs"]
-
-        # Number of healthy rotors
-        N = plant.nrotors - len(fi)
-
-        udist = functools.reduce(
-            lambda p, q: np.insert(p, q, np.zeros(N - 1), axis=0),
-            fi,
-            np.vstack((np.eye(N - 1), -np.ones(N - 1))),
+    def get_reward(self, dx, du):
+        reward = -(
+            +dx[None, :] @ self.Q @ dx[:, None] + du[None, :] @ self.R @ du[:, None]
         )
-
-        # LQR control gains
-        Q = np.diag([5, 20, 20, 0, 0, 0])
-        R = np.diag(np.ones(N - 1))
-
-        # # Rotor forces without faulty rotors
-        # partial_hover_rotorfs = np.delete(hrotorfs, fi, axis=0)
-
-        # Linearized
-        x0 = self.NHS["obs"][:, None]
-        u0 = np.zeros((N - 1, 1))
-        A = fym.jacob_analytic(deriv, 0)(x0, u0)[:, :, 0]
-        B = fym.jacob_analytic(deriv, 1)(x0, u0)[:, :, 0]
-        K, _ = fym.clqr(A, B, Q, R)
-
-        return {
-            "udist": udist,
-            # "x0": x0,
-            "K": K,
-            # "Ccb": Ccb,
-            # "nbdnc": nbdnc.ravel(),
-            # "partial_hover_rotorfs": partial_hover_rotorfs,
-        }
+        reward = np.exp(reward)
+        return reward.ravel()
